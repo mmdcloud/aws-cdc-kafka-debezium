@@ -33,14 +33,14 @@ resource "aws_ecs_service" "carshub-service" {
   deployment_controller {
     type = var.deployment_controller_type
   }
-  dynamic "load_balancer" {
-    for_each = var.load_balancer_config
-    content {
-      container_name   = load_balancer.value["container_name"]
-      container_port   = load_balancer.value["container_port"]
-      target_group_arn = load_balancer.value["target_group_arn"]
-    }
-  }
+  # dynamic "load_balancer" {
+  #   for_each = var.load_balancer_config
+  #   content {
+  #     container_name   = load_balancer.value["container_name"]
+  #     container_port   = load_balancer.value["container_port"]
+  #     target_group_arn = load_balancer.value["target_group_arn"]
+  #   }
+  # }
   tags = {
     Name = var.service_name
   }

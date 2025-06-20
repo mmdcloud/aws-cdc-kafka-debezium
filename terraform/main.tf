@@ -26,8 +26,34 @@ module "rds_sg" {
       to_port         = 5432
       protocol        = "tcp"
       self            = "false"
-      cidr_blocks     = []
-      security_groups = [module.carshub_ecs_backend_sg.id]
+      cidr_blocks     = ["0.0.0.0/0"]
+      security_groups = []
+      description     = "any"
+    }
+  ]
+  egress = [
+    {
+      from_port   = 0
+      to_port     = 0
+      protocol    = "-1"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
+  ]
+}
+
+# ECS Security Group
+module "ecs_sg" {
+  source = "./modules/vpc/security_groups"
+  vpc_id = module.vpc.vpc_id
+  name   = "ecs-sg"
+  ingress = [
+    {
+      from_port       = 0
+      to_port         = 0
+      protocol        = "tcp"
+      self            = "false"
+      cidr_blocks     = ["0.0.0.0/0"]
+      security_groups = []
       description     = "any"
     }
   ]
@@ -52,8 +78,8 @@ module "msk_sg" {
       to_port         = 9098
       protocol        = "tcp"
       self            = "false"
-      cidr_blocks     = []
-      security_groups = [module.carshub_ecs_backend_sg.id]
+      cidr_blocks     = ["0.0.0.0/0"]
+      security_groups = []
       description     = "any"
     }
   ]
@@ -91,7 +117,7 @@ module "public_subnets" {
 
 # Private Subnets
 module "private_subnets" {
-  source = "../../../modules/vpc/subnets"
+  source = "./modules/vpc/subnets"
   name   = "private-subnet"
   subnets = [
     {
@@ -135,27 +161,6 @@ module "private_rt" {
   vpc_id  = module.vpc.vpc_id
 }
 
-# module "vpc" {
-#   source  = "terraform-aws-modules/vpc/aws"
-#   version = "~> 5.0"
-
-#   name = "cdc-demo-vpc"
-#   cidr = "10.0.0.0/16"
-
-#   azs             = ["us-east-1a", "us-east-1b"]
-#   private_subnets = ["10.0.1.0/24", "10.0.2.0/24"]
-#   public_subnets  = ["10.0.101.0/24", "10.0.102.0/24"]
-
-#   enable_nat_gateway   = true
-#   single_nat_gateway   = true
-#   enable_dns_hostnames = true
-
-#   tags = {
-#     Terraform   = "true"
-#     Environment = "demo"
-#   }
-# }
-
 # -----------------------------------------------------------------------------------------
 # Secrets Manager
 # -----------------------------------------------------------------------------------------
@@ -175,164 +180,67 @@ module "db_credentials" {
 # -----------------------------------------------------------------------------------------
 module "source_db" {
   source                          = "./modules/rds"
-  db_name                         = "cdc-source-db"
+  db_name                         = "cdcsourcedb"
   allocated_storage               = 100
   engine                          = "postgres"
-  engine_version                  = "13.4"
+  engine_version                  = "17.2"
   instance_class                  = "db.t4g.large"
   multi_az                        = true
   username                        = tostring(data.vault_generic_secret.rds.data["username"])
   password                        = tostring(data.vault_generic_secret.rds.data["password"])
   subnet_group_name               = "cdc-rds-subnet-group"
-  enabled_cloudwatch_logs_exports = ["audit", "error", "general", "slowquery"]
+  # enabled_cloudwatch_logs_exports = ["audit", "error", "general", "slowquery"]
   backup_retention_period         = 7
   backup_window                   = "03:00-06:00"
   maintenance_window              = "Mon:00:00-Mon:03:00"
   subnet_group_ids = [
-    module.carshub_private_subnets.subnets[0].id,
-    module.carshub_private_subnets.subnets[1].id,
-    module.carshub_private_subnets.subnets[2].id
+    module.private_subnets.subnets[0].id,
+    module.private_subnets.subnets[1].id,
+    module.private_subnets.subnets[2].id
   ]
   vpc_security_group_ids                = [module.rds_sg.id]
   publicly_accessible                   = false
-  deletion_protection                   = true
-  skip_final_snapshot                   = false
+  deletion_protection                   = false
+  skip_final_snapshot                   = true
   max_allocated_storage                 = 500
   performance_insights_enabled          = true
   performance_insights_retention_period = 7
-  parameter_group_name                  = "cdc-postgres13-params"
-  parameter_group_family                = "postgres13"
+  parameter_group_name                  = "cdc-postgres17-params"
+  parameter_group_family                = "postgres17"
   parameters = [
-    {
-      name  = "rds.logical_replication"
-      value = "1"
-    },
-    {
-      name  = "wal_sender_timeout"
-      value = "0"
-    },
-    {
-      name  = "max_replication_slots"
-      value = "10"
-    },
-    {
-      name  = "max_wal_senders"
-      value = "10"
-    },
-    {
-      name  = "max_connections"
-      value = "500"
-    }
+    # {
+    #   name  = "wal_sender_timeout"
+    #   value = "0"
+    # },
+    # {
+    #   name  = "max_replication_slots"
+    #   value = "10"
+    # },
+    # {
+    #   name  = "max_wal_senders"
+    #   value = "10"
+    # },
+    # {
+    #   name  = "max_connections"
+    #   value = "500"
+    # }
   ]
 }
 
-# RDS PostgreSQL Instance
-# resource "aws_db_instance" "source_db" {
-#   identifier             = "cdc-source-db"
-#   instance_class         = "db.t3.medium"
-#   allocated_storage      = 20
-#   engine                 = "postgres"
-#   engine_version         = "13.4"
-#   username               = "postgres"
-#   password               = var.db_password
-#   db_name                = "inventory"
-#   parameter_group_name   = aws_db_parameter_group.cdc_pg.name
-#   vpc_security_group_ids = [aws_security_group.rds.id]
-#   publicly_accessible    = false
-#   skip_final_snapshot    = true
-#   multi_az               = false
-#   db_subnet_group_name   = aws_db_subnet_group.rds.name
-
-#   # Enable logical replication
-#   backup_retention_period = 7
-#   backup_window           = "03:00-06:00"
-#   maintenance_window      = "Mon:00:00-Mon:03:00"
-# }
-
-# resource "aws_db_parameter_group" "cdc_pg" {
-#   name   = "cdc-postgres13-params"
-#   family = "postgres13"
-
-#   parameter {
-#     name  = "rds.logical_replication"
-#     value = "1"
-#   }
-
-#   parameter {
-#     name  = "wal_sender_timeout"
-#     value = "0"
-#   }
-
-#   parameter {
-#     name  = "max_replication_slots"
-#     value = "10"
-#   }
-
-#   parameter {
-#     name  = "max_wal_senders"
-#     value = "10"
-#   }
-
-#   parameter {
-#     name  = "max_connections"
-#     value = "500"
-#   }
-# }
-
-# resource "aws_db_subnet_group" "rds" {
-#   name       = "cdc-rds-subnet-group"
-#   subnet_ids = module.vpc.private_subnets
-
-#   tags = {
-#     Name = "CDC RDS Subnet Group"
-#   }
-# }
-
 # MSK Cluster
-resource "aws_msk_cluster" "cdc_kafka" {
-  cluster_name           = "cdc-demo-cluster"
-  kafka_version          = "2.8.1"
-  number_of_broker_nodes = 2
-
-  broker_node_group_info {
-    instance_type   = "kafka.m5.large"
-    client_subnets  = module.vpc.private_subnets
-    security_groups = [aws_security_group.msk.id]
-    storage_info {
-      ebs_storage_info {
-        volume_size = 100
-      }
-    }
-  }
-
-  configuration_info {
-    arn      = aws_msk_configuration.cdc_config.arn
-    revision = aws_msk_configuration.cdc_config.latest_revision
-  }
-
-  encryption_info {
-    encryption_in_transit {
-      client_broker = "TLS_PLAINTEXT"
-    }
-  }
-
-  open_monitoring {
-    prometheus {
-      jmx_exporter {
-        enabled_in_broker = true
-      }
-      node_exporter {
-        enabled_in_broker = true
-      }
-    }
-  }
-}
-
-resource "aws_msk_configuration" "cdc_config" {
-  kafka_versions = ["2.8.1"]
-  name           = "cdc-demo-config"
-
-  server_properties = <<PROPERTIES
+module "msk_cluster" {
+  source                              = "./modules/msk"
+  cluster_name                        = "cdc-demo-cluster"
+  kafka_version                       = "2.8.1"
+  number_of_broker_nodes              = 3
+  instance_type                       = "kafka.m5.large"
+  client_subnets                      = module.private_subnets.subnets[*].id
+  security_groups                     = [module.msk_sg.id]
+  ebs_volume_size                     = 100
+  encryption_in_transit_client_broker = "TLS_PLAINTEXT"
+  configuraion_name                   = "cdc-demo-config"
+  configuraion_kafka_versions         = ["2.8.1"]
+  configuraion_server_properties      = <<PROPERTIES
 auto.create.topics.enable=true
 delete.topic.enable=true
 log.retention.hours=168
@@ -373,24 +281,24 @@ module "debezium_connect_ecs" {
         "image" : "debezium/connect:1.9",
         "cpu" : 1024,
         "memory" : 2048,
-        "essential" : true,                
+        "essential" : true,
         "portMappings" : [
           {
-            "containerPort" : 3000,
-            "hostPort" : 3000,
+            "containerPort" : 8083,
+            "hostPort" : 8083,
             "name" : "debezium_ecs_service"
           }
         ],
         "logConfiguration" : {
           "logDriver" : "awslogs",
           "options" : {
-            "awslogs-group" : "${module.carshub_frontend_ecs_log_group.name}",
+            "awslogs-group" : "/ecs/debezium-connect",
             "awslogs-region" : "us-east-1",
             "awslogs-stream-prefix" : "ecs"
           }
         },
         environment = [
-          { name = "BOOTSTRAP_SERVERS", value = aws_msk_cluster.cdc_kafka.bootstrap_brokers_tls },
+          { name = "BOOTSTRAP_SERVERS", value = module.msk_cluster.bootstrap_brokers_tls },
           { name = "GROUP_ID", value = "debezium-connect-cluster" },
           { name = "CONFIG_STORAGE_TOPIC", value = "debezium-connect-configs" },
           { name = "OFFSET_STORAGE_TOPIC", value = "debezium-connect-offsets" },
@@ -410,127 +318,20 @@ module "debezium_connect_ecs" {
   service_desired_count       = 1
 
   deployment_controller_type = "ECS"
-  load_balancer_config = [{
-    container_name   = "debezium_ecs_service"
-    container_port   = 3000
-    target_group_arn = module.carshub_frontend_lb.target_groups[0].arn
-  }]
+  # load_balancer_config = [{
+  #   container_name   = "debezium_ecs_service"
+  #   container_port   = 3000
+  #   target_group_arn = module.carshub_frontend_lb.target_groups[0].arn
+  # }]
 
-  security_groups = [module.carshub_ecs_frontend_sg.id]
+  security_groups = [module.ecs_sg.id]
   subnets = [
-    module.carshub_private_subnets.subnets[0].id,
-    module.carshub_private_subnets.subnets[1].id,
-    module.carshub_private_subnets.subnets[2].id
+    module.private_subnets.subnets[0].id,
+    module.private_subnets.subnets[1].id,
+    module.private_subnets.subnets[2].id
   ]
   assign_public_ip = false
 }
-
-resource "aws_ecs_task_definition" "debezium_connect" {
-  family                   = "debezium-connect"
-  network_mode             = "awsvpc"
-  requires_compatibilities = ["FARGATE"]
-  cpu                      = 1024
-  memory                   = 2048
-  execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
-  task_role_arn            = aws_iam_role.debezium_task_role.arn
-
-  container_definitions = jsonencode([{
-    name      = "debezium-connect"
-    image     = "debezium/connect:1.9"
-    essential = true
-    environment = [
-      { name = "BOOTSTRAP_SERVERS", value = aws_msk_cluster.cdc_kafka.bootstrap_brokers_tls },
-      { name = "GROUP_ID", value = "debezium-connect-cluster" },
-      { name = "CONFIG_STORAGE_TOPIC", value = "debezium-connect-configs" },
-      { name = "OFFSET_STORAGE_TOPIC", value = "debezium-connect-offsets" },
-      { name = "STATUS_STORAGE_TOPIC", value = "debezium-connect-status" },
-      { name = "CONNECT_KEY_CONVERTER", value = "org.apache.kafka.connect.json.JsonConverter" },
-      { name = "CONNECT_VALUE_CONVERTER", value = "org.apache.kafka.connect.json.JsonConverter" },
-      { name = "CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE", value = "false" },
-      { name = "CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE", value = "false" }
-    ]
-    logConfiguration = {
-      logDriver = "awslogs",
-      options = {
-        "awslogs-group"         = "/ecs/debezium-connect",
-        "awslogs-region"        = "us-east-1",
-        "awslogs-stream-prefix" = "ecs"
-      }
-    }
-    portMappings = [{
-      containerPort = 8083
-      hostPort      = 8083
-    }]
-  }])
-}
-
-resource "aws_ecs_service" "debezium_connect" {
-  name            = "debezium-connect-service"
-  cluster         = aws_ecs_cluster.debezium.id
-  task_definition = aws_ecs_task_definition.debezium_connect.arn
-  desired_count   = 1
-  launch_type     = "FARGATE"
-
-  network_configuration {
-    subnets          = module.vpc.private_subnets
-    security_groups  = [aws_security_group.ecs.id]
-    assign_public_ip = false
-  }
-}
-
-# Security Groups
-# resource "aws_security_group" "rds" {
-#   name        = "cdc-rds-sg"
-#   description = "Allow access to RDS"
-#   vpc_id      = module.vpc.vpc_id
-
-#   ingress {
-#     from_port       = 5432
-#     to_port         = 5432
-#     protocol        = "tcp"
-#     security_groups = [aws_security_group.ecs.id]
-#   }
-
-#   egress {
-#     from_port   = 0
-#     to_port     = 0
-#     protocol    = "-1"
-#     cidr_blocks = ["0.0.0.0/0"]
-#   }
-# }
-
-# resource "aws_security_group" "msk" {
-#   name        = "cdc-msk-sg"
-#   description = "Allow access to MSK"
-#   vpc_id      = module.vpc.vpc_id
-
-#   ingress {
-#     from_port       = 9092
-#     to_port         = 9098
-#     protocol        = "tcp"
-#     security_groups = [aws_security_group.ecs.id]
-#   }
-
-#   egress {
-#     from_port   = 0
-#     to_port     = 0
-#     protocol    = "-1"
-#     cidr_blocks = ["0.0.0.0/0"]
-#   }
-# }
-
-# resource "aws_security_group" "ecs" {
-#   name        = "cdc-ecs-sg"
-#   description = "Allow ECS to access RDS and MSK"
-#   vpc_id      = module.vpc.vpc_id
-
-#   egress {
-#     from_port   = 0
-#     to_port     = 0
-#     protocol    = "-1"
-#     cidr_blocks = ["0.0.0.0/0"]
-#   }
-# }
 
 # -----------------------------------------------------------------------------------------
 # IAM Roles and Policies
@@ -594,47 +395,6 @@ module "debezium_task_role" {
     }
     EOF
 }
-
-# resource "aws_iam_role" "debezium_task_role" {
-#   name = "debezium-task-role"
-
-#   assume_role_policy = jsonencode({
-#     Version = "2012-10-17"
-#     Statement = [
-#       {
-#         Action = "sts:AssumeRole"
-#         Effect = "Allow"
-#         Principal = {
-#           Service = "ecs-tasks.amazonaws.com"
-#         }
-#       }
-#     ]
-#   })
-# }
-
-# resource "aws_iam_policy" "debezium_policy" {
-#   name        = "debezium-policy"
-#   description = "Policy for Debezium to access MSK and RDS"
-
-#   policy = jsonencode({
-#     Version = "2012-10-17"
-#     Statement = [
-#       {
-#         Effect = "Allow"
-#         Action = [
-#           "kafka:GetBootstrapBrokers",
-#           "kafka:DescribeCluster"
-#         ]
-#         Resource = "*"
-#       }
-#     ]
-#   })
-# }
-
-# resource "aws_iam_role_policy_attachment" "debezium_policy_attachment" {
-#   role       = aws_iam_role.debezium_task_role.name
-#   policy_arn = aws_iam_policy.debezium_policy.arn
-# }
 
 # -----------------------------------------------------------------------------------------
 # S3 Configuration

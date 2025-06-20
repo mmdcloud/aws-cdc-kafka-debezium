@@ -17,13 +17,13 @@ variable "service_desired_count" {}
 
 variable "deployment_controller_type" {}
 
-variable "load_balancer_config" {
-  type = list(object({
-    container_name = string
-    container_port = string
-    target_group_arn = string
-  }))
-}
+# variable "load_balancer_config" {
+#   type = list(object({
+#     container_name = string
+#     container_port = string
+#     target_group_arn = string
+#   }))
+# }
 
 variable "security_groups" {}
 variable "subnets" {}

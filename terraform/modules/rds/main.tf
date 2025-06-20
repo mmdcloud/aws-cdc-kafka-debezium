@@ -16,7 +16,7 @@ resource "aws_db_instance" "db" {
   backup_window        = var.backup_window
   maintenance_window   = var.maintenance_window
   deletion_protection = var.deletion_protection
-  enabled_cloudwatch_logs_exports = var.enabled_cloudwatch_logs_exports
+  # enabled_cloudwatch_logs_exports = var.enabled_cloudwatch_logs_exports
   skip_final_snapshot  = var.skip_final_snapshot
   db_subnet_group_name   = aws_db_subnet_group.rds_subnet_group.name
   vpc_security_group_ids = var.vpc_security_group_ids

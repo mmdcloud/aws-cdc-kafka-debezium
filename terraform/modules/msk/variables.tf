@@ -1,0 +1,11 @@
+variable "cluster_name"{}
+variable "kafka_version"{}
+variable "number_of_broker_nodes"{}
+variable "instance_type"{}
+variable "client_subnets"{}
+variable "security_groups"{}
+variable "ebs_volume_size"{}
+variable "encryption_in_transit_client_broker"{}
+variable "configuraion_kafka_versions"{}
+variable "configuraion_name"{}
+variable "configuraion_server_properties"{} 

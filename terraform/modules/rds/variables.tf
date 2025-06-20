@@ -26,7 +26,7 @@ variable "deletion_protection" {}
 variable "max_allocated_storage"{}
 variable "performance_insights_enabled"{}
 variable "performance_insights_retention_period"{}
-variable "enabled_cloudwatch_logs_exports" {
-  type = list(string)
-  default = []
-}
+# variable "enabled_cloudwatch_logs_exports" {
+#   type = list(string)
+#   default = []
+# }
