@@ -292,8 +292,8 @@ module "plugins_bucket" {
   bucket_name = "cdcdebeziumplugins"
   objects = [
     {
-      key    = "debezium-mysql-connector.zip"
-      source = "../connectors/debezium-mysql-connector.zip"
+      key    = "debezium-postgres-connector.zip"
+      source = "../connectors/debezium-postgres-connector.zip"
     },
     {
       key    = "s3-sink.zip"
@@ -324,14 +324,14 @@ module "plugins_bucket" {
 }
 
 # MSK Connect Custom Plugin - Debezium source connector
-resource "aws_mskconnect_custom_plugin" "debezium_mysql_plugin" {
-  name         = "debezium-mysql-plugin"
+resource "aws_mskconnect_custom_plugin" "debezium_postgres_plugin" {
+  name         = "debezium-postgres-plugin"
   content_type = "ZIP"
 
   location {
     s3 {
       bucket_arn = module.destination_bucket.arn
-      file_key   = "debezium-mysql-connector.zip"
+      file_key   = "debezium-postgres-connector.zip"
     }
   }
 }
@@ -349,8 +349,8 @@ resource "aws_mskconnect_custom_plugin" "s3_sink_plugin" {
   }
 }
 
-resource "aws_iam_role" "msk_connect_role" {
-  name = "msk-connect-service-execution-role"
+resource "aws_iam_role" "debezium_connector_role" {
+  name = "debezium-connector-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17",
@@ -364,9 +364,9 @@ resource "aws_iam_role" "msk_connect_role" {
   })
 }
 
-resource "aws_iam_policy" "msk_connect_policy" {
-  name        = "msk-connect-policy"
-  description = "Policy for MSK Connect service execution role"
+resource "aws_iam_policy" "debezium_connector_policy" {
+  name        = "debezium-connector-policy"
+  description = "Policy for Debezium connector service execution role"
 
   policy = jsonencode({
     Version = "2012-10-17",
@@ -387,7 +387,74 @@ resource "aws_iam_policy" "msk_connect_policy" {
           "kafka:ReadData",
           "kafka:WriteData"
         ],
-        Resource = "*" # For better security, narrow this down to your MSK cluster and topics ARNs
+        Resource = "${module.msk_cluster.arn}"
+      },
+      {
+        Effect = "Allow",
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "logs:DescribeLogGroups",
+          "logs:DescribeLogStreams"
+        ],
+        Resource = "*"
+      },
+      {
+        Effect = "Allow",
+        Action = [
+          "secretsmanager:GetSecretValue"
+        ],
+        Resource = "*" # Restrict this to your secrets ARN if using Secrets Manager
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "attach_debezium_connector_policy" {
+  role       = aws_iam_role.debezium_connector_role.name
+  policy_arn = aws_iam_policy.debezium_connector_policy.arn
+}
+
+resource "aws_iam_role" "s3_sink_role" {
+  name = "s3-sink-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [{
+      Effect = "Allow",
+      Principal = {
+        Service = "kafkaconnect.amazonaws.com"
+      },
+      Action = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_policy" "s3_sink_policy" {
+  name        = "s3-sink-policy"
+  description = "Policy for S3 sink connector service execution role"
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Action = [
+          "kafka:DescribeCluster",
+          "kafka:DescribeTopic",
+          "kafka:GetBootstrapBrokers",
+          "kafka:CreateTopic",
+          "kafka:DeleteTopic",
+          "kafka:DescribeGroup",
+          "kafka:ListGroups",
+          "kafka:AlterCluster",
+          "kafka:AlterGroup",
+          "kafka:Connect",
+          "kafka:ReadData",
+          "kafka:WriteData"
+        ],
+        Resource = "${module.msk_cluster.arn}"
       },
       {
         Effect = "Allow",
@@ -413,26 +480,19 @@ resource "aws_iam_policy" "msk_connect_policy" {
           "logs:DescribeLogStreams"
         ],
         Resource = "*"
-      },
-      {
-        Effect = "Allow",
-        Action = [
-          "secretsmanager:GetSecretValue"
-        ],
-        Resource = "*" # Restrict this to your secrets ARN if using Secrets Manager
       }
     ]
   })
 }
 
-resource "aws_iam_role_policy_attachment" "attach_msk_connect_policy" {
-  role       = aws_iam_role.msk_connect_role.name
-  policy_arn = aws_iam_policy.msk_connect_policy.arn
+resource "aws_iam_role_policy_attachment" "attach_s3_sink_policy" {
+  role       = aws_iam_role.s3_sink_role.name
+  policy_arn = aws_iam_policy.s3_sink_policy.arn
 }
 
 
-resource "aws_mskconnect_connector" "debezium_mysql_connector" {
-  name = "debezium-mysql-connector"
+resource "aws_mskconnect_connector" "debezium_postgres_connector" {
+  name = "debezium-postgres-connector"
 
   kafkaconnect_version = "2.7.1"
 
@@ -454,8 +514,8 @@ resource "aws_mskconnect_connector" "debezium_mysql_connector" {
 
   connector_configuration = {
     "connector.class"   = "io.debezium.connector.postgresql.PostgresConnector"
-    "database.hostname" = var.rds_endpoint
-    "database.port"     = 3306
+    "database.hostname" = "${module.source_db.endpoint}"
+    "database.port"     = 5432
     "plugin.name"       = "pgoutput"
     "slot.name"         = "debezium"
     "publication.name"  = "debezium_pub"
@@ -469,7 +529,11 @@ resource "aws_mskconnect_connector" "debezium_mysql_connector" {
 
       vpc {
         security_groups = [aws_security_group.example.id]
-        subnets         = [aws_subnet.example1.id, aws_subnet.example2.id, aws_subnet.example3.id]
+        subnets = [
+          module.public_subnets.subnets[0].id,
+          module.public_subnets.subnets[1].id,
+          module.public_subnets.subnets[2].id
+        ]
       }
     }
   }
@@ -484,12 +548,12 @@ resource "aws_mskconnect_connector" "debezium_mysql_connector" {
 
   plugin {
     custom_plugin {
-      arn      = aws_mskconnect_custom_plugin.debezium_mysql_plugin.arn
-      revision = aws_mskconnect_custom_plugin.debezium_mysql_plugin.latest_revision
+      arn      = aws_mskconnect_custom_plugin.debezium_postgres_plugin.arn
+      revision = aws_mskconnect_custom_plugin.debezium_postgres_plugin.latest_revision
     }
   }
 
-  service_execution_role_arn = aws_iam_role.msk_connect_role.arn
+  service_execution_role_arn = aws_iam_role.debezium_connector_role.arn
 }
 
 resource "aws_mskconnect_connector" "s3_sink_connector" {
@@ -515,7 +579,7 @@ resource "aws_mskconnect_connector" "s3_sink_connector" {
 
   connector_configuration = {
     "connector.class" = "io.confluent.connect.s3.S3SinkConnector"
-    "topics"          = "your-topic-name"
+    "topics"          = "change-data-capture-postgres"
     "s3.region"       = var.aws_region
     "s3.bucket.name"  = "${module.source_db.name}"
     "format.class"    = "io.confluent.connect.s3.format.json.JsonFormat"
@@ -527,7 +591,11 @@ resource "aws_mskconnect_connector" "s3_sink_connector" {
 
       vpc {
         security_groups = [aws_security_group.example.id]
-        subnets         = [aws_subnet.example1.id, aws_subnet.example2.id, aws_subnet.example3.id]
+        subnets = [
+          module.public_subnets.subnets[0].id,
+          module.public_subnets.subnets[1].id,
+          module.public_subnets.subnets[2].id
+        ]
       }
     }
   }
@@ -547,5 +615,5 @@ resource "aws_mskconnect_connector" "s3_sink_connector" {
     }
   }
 
-  service_execution_role_arn = aws_iam_role.msk_connect_role.arn
+  service_execution_role_arn = aws_iam_role.s3_sink_role.arn
 }
