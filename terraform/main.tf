@@ -7,7 +7,7 @@ data "vault_generic_secret" "rds" {
 # VPC Configuration
 # -----------------------------------------------------------------------------------------
 module "vpc" {
-  source                = "./modules/vpc/vpc"
+  source                = "./modules/vpc/vpc"                           
   vpc_name              = "cdc-vpc"
   vpc_cidr_block        = "10.0.0.0/16"
   enable_dns_hostnames  = true
@@ -15,7 +15,7 @@ module "vpc" {
   internet_gateway_name = "cdc-vpc-igw"
 }
 
-# RDS Security Group
+# RDS Security Group                                                                        
 module "rds_sg" {
   source = "./modules/vpc/security_groups"
   vpc_id = module.vpc.vpc_id
@@ -179,27 +179,27 @@ module "db_credentials" {
 # RDS Instance
 # -----------------------------------------------------------------------------------------
 module "source_db" {
-  source                          = "./modules/rds"
-  db_name                         = "cdcsourcedb"
-  allocated_storage               = 100
-  engine                          = "postgres"
-  engine_version                  = "17.2"
-  instance_class                  = "db.t4g.large"
-  multi_az                        = true
-  username                        = tostring(data.vault_generic_secret.rds.data["username"])
-  password                        = tostring(data.vault_generic_secret.rds.data["password"])
-  subnet_group_name               = "cdc-rds-subnet-group"
+  source            = "./modules/rds"
+  db_name           = "cdcsourcedb"
+  allocated_storage = 100
+  engine            = "postgres"
+  engine_version    = "17.2"
+  instance_class    = "db.t4g.large"
+  multi_az          = true
+  username          = tostring(data.vault_generic_secret.rds.data["username"])
+  password          = tostring(data.vault_generic_secret.rds.data["password"])
+  subnet_group_name = "cdc-rds-subnet-group"
   # enabled_cloudwatch_logs_exports = ["audit", "error", "general", "slowquery"]
-  backup_retention_period         = 7
-  backup_window                   = "03:00-06:00"
-  maintenance_window              = "Mon:00:00-Mon:03:00"
+  backup_retention_period = 7
+  backup_window           = "03:00-06:00"
+  maintenance_window      = "Mon:00:00-Mon:03:00"
   subnet_group_ids = [
-    module.private_subnets.subnets[0].id,
-    module.private_subnets.subnets[1].id,
-    module.private_subnets.subnets[2].id
+    module.public_subnets.subnets[0].id,
+    module.public_subnets.subnets[1].id,
+    module.public_subnets.subnets[2].id
   ]
   vpc_security_group_ids                = [module.rds_sg.id]
-  publicly_accessible                   = false
+  publicly_accessible                   = true
   deletion_protection                   = false
   skip_final_snapshot                   = true
   max_allocated_storage                 = 500
@@ -234,7 +234,7 @@ module "msk_cluster" {
   kafka_version                       = "2.8.1"
   number_of_broker_nodes              = 3
   instance_type                       = "kafka.m5.large"
-  client_subnets                      = module.private_subnets.subnets[*].id
+  client_subnets                      = module.public_subnets.subnets[*].id
   security_groups                     = [module.msk_sg.id]
   ebs_volume_size                     = 100
   encryption_in_transit_client_broker = "TLS_PLAINTEXT"
@@ -326,11 +326,11 @@ module "debezium_connect_ecs" {
 
   security_groups = [module.ecs_sg.id]
   subnets = [
-    module.private_subnets.subnets[0].id,
-    module.private_subnets.subnets[1].id,
-    module.private_subnets.subnets[2].id
+    module.public_subnets.subnets[0].id,
+    module.public_subnets.subnets[1].id,
+    module.public_subnets.subnets[2].id
   ]
-  assign_public_ip = false
+  assign_public_ip = true
 }
 
 # -----------------------------------------------------------------------------------------

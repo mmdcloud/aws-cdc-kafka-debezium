@@ -1,12 +1,22 @@
-# Outputs
+# RDS Outputs
 output "rds_endpoint" {
-  value = module.source_db.endpoint
+  description = "The connection endpoint for the RDS instance"
+  value       = module.source_db.endpoint
 }
 
-output "kafka_bootstrap_brokers" {
-  value = module.msk_cluster.bootstrap_brokers_tls
+# MSK Outputs
+output "msk_bootstrap_brokers_tls" {
+  description = "TLS connection host:port pairs for the MSK brokers"
+  value       = module.msk_cluster.bootstrap_brokers_tls
 }
 
-# output "debezium_connect_endpoint" {
-#   value = "${aws_ecs_service.debezium_connect.name}.${aws_ecs_cluster.debezium.name}"
-# }
+output "msk_bootstrap_brokers_plaintext" {
+  description = "Plaintext connection host:port pairs for the MSK brokers"
+  value       = module.msk_cluster.bootstrap_brokers
+}
+
+# ECS Outputs
+output "debezium_connect_service_url" {
+  description = "URL for the Debezium Connect service"
+  value       = "http://${module.debezium_connect_ecs.service_discovery_dns}:8083"
+}
