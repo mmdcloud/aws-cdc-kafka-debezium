@@ -16,7 +16,7 @@ output "msk_bootstrap_brokers_plaintext" {
 }
 
 # ECS Outputs
-output "debezium_connect_service_url" {
-  description = "URL for the Debezium Connect service"
-  value       = "http://${module.debezium_connect_ecs.service_discovery_dns}:8083"
-}
+# output "debezium_connect_service_url" {
+#   description = "URL for the Debezium Connect service"
+#   value       = "http://${module.debezium_connect_ecs.service_discovery_dns}:8083"
+# }

@@ -7,7 +7,7 @@ data "vault_generic_secret" "rds" {
 # VPC Configuration
 # -----------------------------------------------------------------------------------------
 module "vpc" {
-  source                = "./modules/vpc/vpc"                           
+  source                = "./modules/vpc/vpc"
   vpc_name              = "cdc-vpc"
   vpc_cidr_block        = "10.0.0.0/16"
   enable_dns_hostnames  = true
@@ -257,149 +257,9 @@ transaction.state.log.min.isr=1
 PROPERTIES
 }
 
-# ECS Cluster for Debezium Connect
-resource "aws_ecs_cluster" "debezium_cluster" {
-  name = "debezium-connect-cluster"
-}
-
-# Debezium Connect ECS Configuration
-module "debezium_connect_ecs" {
-  source                                   = "./modules/ecs"
-  task_definition_family                   = "debezium-connect"
-  task_definition_requires_compatibilities = ["FARGATE"]
-  task_definition_cpu                      = 2048
-  task_definition_memory                   = 4096
-  task_definition_execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
-  task_definition_task_role_arn            = aws_iam_role.ecs_task_execution_role.arn
-  task_definition_network_mode             = "awsvpc"
-  task_definition_cpu_architecture         = "X86_64"
-  task_definition_operating_system_family  = "LINUX"
-  task_definition_container_definitions = jsonencode(
-    [
-      {
-        "name" : "debezium-connect",
-        "image" : "debezium/connect:1.9",
-        "cpu" : 1024,
-        "memory" : 2048,
-        "essential" : true,
-        "portMappings" : [
-          {
-            "containerPort" : 8083,
-            "hostPort" : 8083,
-            "name" : "debezium_ecs_service"
-          }
-        ],
-        "logConfiguration" : {
-          "logDriver" : "awslogs",
-          "options" : {
-            "awslogs-group" : "/ecs/debezium-connect",
-            "awslogs-region" : "us-east-1",
-            "awslogs-stream-prefix" : "ecs"
-          }
-        },
-        environment = [
-          { name = "BOOTSTRAP_SERVERS", value = module.msk_cluster.bootstrap_brokers_tls },
-          { name = "GROUP_ID", value = "debezium-connect-cluster" },
-          { name = "CONFIG_STORAGE_TOPIC", value = "debezium-connect-configs" },
-          { name = "OFFSET_STORAGE_TOPIC", value = "debezium-connect-offsets" },
-          { name = "STATUS_STORAGE_TOPIC", value = "debezium-connect-status" },
-          { name = "CONNECT_KEY_CONVERTER", value = "org.apache.kafka.connect.json.JsonConverter" },
-          { name = "CONNECT_VALUE_CONVERTER", value = "org.apache.kafka.connect.json.JsonConverter" },
-          { name = "CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE", value = "false" },
-          { name = "CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE", value = "false" }
-        ]
-      }
-  ])
-
-  service_name                = "debezium_ecs_service"
-  service_cluster             = aws_ecs_cluster.debezium_cluster.id
-  service_launch_type         = "FARGATE"
-  service_scheduling_strategy = "REPLICA"
-  service_desired_count       = 1
-
-  deployment_controller_type = "ECS"
-  # load_balancer_config = [{
-  #   container_name   = "debezium_ecs_service"
-  #   container_port   = 3000
-  #   target_group_arn = module.carshub_frontend_lb.target_groups[0].arn
-  # }]
-
-  security_groups = [module.ecs_sg.id]
-  subnets = [
-    module.public_subnets.subnets[0].id,
-    module.public_subnets.subnets[1].id,
-    module.public_subnets.subnets[2].id
-  ]
-  assign_public_ip = true
-}
-
-# -----------------------------------------------------------------------------------------
-# IAM Roles and Policies
-# -----------------------------------------------------------------------------------------
-resource "aws_iam_role" "ecs_task_execution_role" {
-  name = "ecs-task-execution-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Principal = {
-          Service = "ecs-tasks.amazonaws.com"
-        }
-      }
-    ]
-  })
-}
-
-resource "aws_iam_role_policy_attachment" "ecs_task_execution_role_policy" {
-  role       = aws_iam_role.ecs_task_execution_role.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
-}
-
-module "debezium_task_role" {
-  source             = "./modules/iam"
-  role_name          = "debezium-task-role"
-  role_description   = "debezium-task-role"
-  policy_name        = "debezium-task-role-policy"
-  policy_description = "debezium-task-role-policy"
-  assume_role_policy = <<EOF
-    {
-        "Version": "2012-10-17",
-        "Statement": [
-            {
-                "Action": "sts:AssumeRole",
-                "Principal": {
-                  "Service": "ecs-tasks.amazonaws.com"
-                },
-                "Effect": "Allow",
-                "Sid": ""
-            }
-        ]
-    }
-    EOF
-  policy             = <<EOF
-    {
-        "Version": "2012-10-17",
-        "Statement": [
-            {
-                "Action": [
-                  "kafka:GetBootstrapBrokers",
-                  "kafka:DescribeCluster"
-                ],
-                "Resource": "*",
-                "Effect": "Allow"
-            }
-        ]
-    }
-    EOF
-}
-
 # -----------------------------------------------------------------------------------------
 # S3 Configuration
 # -----------------------------------------------------------------------------------------
-
 module "destination_bucket" {
   source             = "./modules/s3"
   bucket_name        = "cdcdestinationbucket"
@@ -425,4 +285,267 @@ module "destination_bucket" {
     queue           = []
     lambda_function = []
   }
+}
+
+module "plugins_bucket" {
+  source      = "./modules/s3"
+  bucket_name = "cdcdebeziumplugins"
+  objects = [
+    {
+      key    = "debezium-mysql-connector.zip"
+      source = "../connectors/debezium-mysql-connector.zip"
+    },
+    {
+      key    = "s3-sink.zip"
+      source = "../connectors/s3-sink.zip"
+    }
+  ]
+  versioning_enabled = "Enabled"
+  cors = [
+    {
+      allowed_headers = ["*"]
+      allowed_methods = ["GET"]
+      allowed_origins = ["*"]
+      max_age_seconds = 3000
+    },
+    {
+      allowed_headers = ["*"]
+      allowed_methods = ["PUT"]
+      allowed_origins = ["*"]
+      max_age_seconds = 3000
+    }
+  ]
+  bucket_policy = ""
+  force_destroy = false
+  bucket_notification = {
+    queue           = []
+    lambda_function = []
+  }
+}
+
+# MSK Connect Custom Plugin - Debezium source connector
+resource "aws_mskconnect_custom_plugin" "debezium_mysql_plugin" {
+  name         = "debezium-mysql-plugin"
+  content_type = "ZIP"
+
+  location {
+    s3 {
+      bucket_arn = module.destination_bucket.arn
+      file_key   = "debezium-mysql-connector.zip"
+    }
+  }
+}
+
+# MSK Connect Custom Plugin - S3 sink connector
+resource "aws_mskconnect_custom_plugin" "s3_sink_plugin" {
+  name         = "s3-sink-plugin"
+  content_type = "ZIP"
+
+  location {
+    s3 {
+      bucket_arn = module.destination_bucket.arn
+      file_key   = "s3-sink.zip"
+    }
+  }
+}
+
+resource "aws_iam_role" "msk_connect_role" {
+  name = "msk-connect-service-execution-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [{
+      Effect = "Allow",
+      Principal = {
+        Service = "kafkaconnect.amazonaws.com"
+      },
+      Action = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_policy" "msk_connect_policy" {
+  name        = "msk-connect-policy"
+  description = "Policy for MSK Connect service execution role"
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Action = [
+          "kafka:DescribeCluster",
+          "kafka:DescribeTopic",
+          "kafka:GetBootstrapBrokers",
+          "kafka:CreateTopic",
+          "kafka:DeleteTopic",
+          "kafka:DescribeGroup",
+          "kafka:ListGroups",
+          "kafka:AlterCluster",
+          "kafka:AlterGroup",
+          "kafka:Connect",
+          "kafka:ReadData",
+          "kafka:WriteData"
+        ],
+        Resource = "*" # For better security, narrow this down to your MSK cluster and topics ARNs
+      },
+      {
+        Effect = "Allow",
+        Action = [
+          "s3:PutObject",
+          "s3:GetObject",
+          "s3:ListBucket",
+          "s3:AbortMultipartUpload",
+          "s3:GetBucketLocation"
+        ],
+        Resource = [
+          "${module.destination_bucket.arn}",
+          "${module.destination_bucket.arn}/*"
+        ]
+      },
+      {
+        Effect = "Allow",
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "logs:DescribeLogGroups",
+          "logs:DescribeLogStreams"
+        ],
+        Resource = "*"
+      },
+      {
+        Effect = "Allow",
+        Action = [
+          "secretsmanager:GetSecretValue"
+        ],
+        Resource = "*" # Restrict this to your secrets ARN if using Secrets Manager
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "attach_msk_connect_policy" {
+  role       = aws_iam_role.msk_connect_role.name
+  policy_arn = aws_iam_policy.msk_connect_policy.arn
+}
+
+
+resource "aws_mskconnect_connector" "debezium_mysql_connector" {
+  name = "debezium-mysql-connector"
+
+  kafkaconnect_version = "2.7.1"
+
+  capacity {
+    autoscaling {
+      mcu_count        = 1
+      min_worker_count = 1
+      max_worker_count = 2
+
+      scale_in_policy {
+        cpu_utilization_percentage = 20
+      }
+
+      scale_out_policy {
+        cpu_utilization_percentage = 80
+      }
+    }
+  }
+
+  connector_configuration = {
+    "connector.class"   = "io.debezium.connector.postgresql.PostgresConnector"
+    "database.hostname" = var.rds_endpoint
+    "database.port"     = 3306
+    "plugin.name"       = "pgoutput"
+    "slot.name"         = "debezium"
+    "publication.name"  = "debezium_pub"
+    "database.user"     = tostring(data.vault_generic_secret.rds.data["username"])
+    "database.password" = tostring(data.vault_generic_secret.rds.data["password"])
+  }
+
+  kafka_cluster {
+    apache_kafka_cluster {
+      bootstrap_servers = module.msk_cluster.bootstrap_brokers_tls
+
+      vpc {
+        security_groups = [aws_security_group.example.id]
+        subnets         = [aws_subnet.example1.id, aws_subnet.example2.id, aws_subnet.example3.id]
+      }
+    }
+  }
+
+  kafka_cluster_client_authentication {
+    authentication_type = "NONE"
+  }
+
+  kafka_cluster_encryption_in_transit {
+    encryption_type = "TLS"
+  }
+
+  plugin {
+    custom_plugin {
+      arn      = aws_mskconnect_custom_plugin.debezium_mysql_plugin.arn
+      revision = aws_mskconnect_custom_plugin.debezium_mysql_plugin.latest_revision
+    }
+  }
+
+  service_execution_role_arn = aws_iam_role.msk_connect_role.arn
+}
+
+resource "aws_mskconnect_connector" "s3_sink_connector" {
+  name = "s3-sink-connector"
+
+  kafkaconnect_version = "2.7.1"
+
+  capacity {
+    autoscaling {
+      mcu_count        = 1
+      min_worker_count = 1
+      max_worker_count = 2
+
+      scale_in_policy {
+        cpu_utilization_percentage = 20
+      }
+
+      scale_out_policy {
+        cpu_utilization_percentage = 80
+      }
+    }
+  }
+
+  connector_configuration = {
+    "connector.class" = "io.confluent.connect.s3.S3SinkConnector"
+    "topics"          = "your-topic-name"
+    "s3.region"       = var.aws_region
+    "s3.bucket.name"  = "${module.source_db.name}"
+    "format.class"    = "io.confluent.connect.s3.format.json.JsonFormat"
+  }
+
+  kafka_cluster {
+    apache_kafka_cluster {
+      bootstrap_servers = module.msk_cluster.bootstrap_brokers_tls
+
+      vpc {
+        security_groups = [aws_security_group.example.id]
+        subnets         = [aws_subnet.example1.id, aws_subnet.example2.id, aws_subnet.example3.id]
+      }
+    }
+  }
+
+  kafka_cluster_client_authentication {
+    authentication_type = "NONE"
+  }
+
+  kafka_cluster_encryption_in_transit {
+    encryption_type = "TLS"
+  }
+
+  plugin {
+    custom_plugin {
+      arn      = aws_mskconnect_custom_plugin.s3_sink_plugin.arn
+      revision = aws_mskconnect_custom_plugin.s3_sink_plugin.latest_revision
+    }
+  }
+
+  service_execution_role_arn = aws_iam_role.msk_connect_role.arn
 }
