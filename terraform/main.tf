@@ -6,6 +6,7 @@ data "vault_generic_secret" "rds" {
 # -----------------------------------------------------------------------------------------
 # VPC Configuration
 # -----------------------------------------------------------------------------------------
+
 module "vpc" {
   source                = "./modules/vpc/vpc"
   vpc_name              = "cdc-vpc"
@@ -41,32 +42,6 @@ module "rds_sg" {
   ]
 }
 
-# ECS Security Group
-module "ecs_sg" {
-  source = "./modules/vpc/security_groups"
-  vpc_id = module.vpc.vpc_id
-  name   = "ecs-sg"
-  ingress = [
-    {
-      from_port       = 0
-      to_port         = 0
-      protocol        = "tcp"
-      self            = "false"
-      cidr_blocks     = ["0.0.0.0/0"]
-      security_groups = []
-      description     = "any"
-    }
-  ]
-  egress = [
-    {
-      from_port   = 0
-      to_port     = 0
-      protocol    = "-1"
-      cidr_blocks = ["0.0.0.0/0"]
-    }
-  ]
-}
-
 # MSK Security Group
 module "msk_sg" {
   source = "./modules/vpc/security_groups"
@@ -76,6 +51,15 @@ module "msk_sg" {
     {
       from_port       = 9092
       to_port         = 9098
+      protocol        = "tcp"
+      self            = "false"
+      cidr_blocks     = ["0.0.0.0/0"]
+      security_groups = []
+      description     = "any"
+    },
+    {
+      from_port       = 0
+      to_port         = 0
       protocol        = "tcp"
       self            = "false"
       cidr_blocks     = ["0.0.0.0/0"]
@@ -121,7 +105,7 @@ module "private_subnets" {
   name   = "private-subnet"
   subnets = [
     {
-      subnet = "10.0.6.0/24"
+      subnet = "10.0.4.0/24"
       az     = "us-east-1a"
     },
     {
@@ -129,7 +113,7 @@ module "private_subnets" {
       az     = "us-east-1b"
     },
     {
-      subnet = "10.0.4.0/24"
+      subnet = "10.0.6.0/24"
       az     = "us-east-1c"
     }
   ]
@@ -164,6 +148,7 @@ module "private_rt" {
 # -----------------------------------------------------------------------------------------
 # Secrets Manager
 # -----------------------------------------------------------------------------------------
+
 module "db_credentials" {
   source                  = "./modules/secrets-manager"
   name                    = "rds-secrets"
@@ -178,6 +163,7 @@ module "db_credentials" {
 # -----------------------------------------------------------------------------------------
 # RDS Instance
 # -----------------------------------------------------------------------------------------
+
 module "source_db" {
   source            = "./modules/rds"
   db_name           = "cdcsourcedb"
@@ -227,10 +213,13 @@ module "source_db" {
   ]
 }
 
+# -----------------------------------------------------------------------------------------
 # MSK Cluster
+# -----------------------------------------------------------------------------------------
+
 module "msk_cluster" {
   source                              = "./modules/msk"
-  cluster_name                        = "cdc-demo-cluster"
+  cluster_name                        = "cdc-cluster"
   kafka_version                       = "2.8.1"
   number_of_broker_nodes              = 3
   instance_type                       = "kafka.m5.large"
@@ -260,6 +249,7 @@ PROPERTIES
 # -----------------------------------------------------------------------------------------
 # S3 Configuration
 # -----------------------------------------------------------------------------------------
+
 module "destination_bucket" {
   source             = "./modules/s3"
   bucket_name        = "cdcdestinationbucket"
@@ -330,10 +320,11 @@ resource "aws_mskconnect_custom_plugin" "debezium_postgres_plugin" {
 
   location {
     s3 {
-      bucket_arn = module.destination_bucket.arn
+      bucket_arn = module.plugins_bucket.arn
       file_key   = "debezium-postgres-connector.zip"
     }
   }
+  depends_on = [ module.plugins_bucket ]
 }
 
 # MSK Connect Custom Plugin - S3 sink connector
@@ -343,10 +334,11 @@ resource "aws_mskconnect_custom_plugin" "s3_sink_plugin" {
 
   location {
     s3 {
-      bucket_arn = module.destination_bucket.arn
+      bucket_arn = module.plugins_bucket.arn
       file_key   = "s3-sink.zip"
     }
   }
+  depends_on = [ module.plugins_bucket ]
 }
 
 resource "aws_iam_role" "debezium_connector_role" {
@@ -405,7 +397,7 @@ resource "aws_iam_policy" "debezium_connector_policy" {
         Action = [
           "secretsmanager:GetSecretValue"
         ],
-        Resource = "*" # Restrict this to your secrets ARN if using Secrets Manager
+        Resource = "*"
       }
     ]
   })
@@ -521,6 +513,7 @@ resource "aws_mskconnect_connector" "debezium_postgres_connector" {
     "publication.name"  = "debezium_pub"
     "database.user"     = tostring(data.vault_generic_secret.rds.data["username"])
     "database.password" = tostring(data.vault_generic_secret.rds.data["password"])
+    "tasks.max"       = "1"
   }
 
   kafka_cluster {
@@ -528,7 +521,7 @@ resource "aws_mskconnect_connector" "debezium_postgres_connector" {
       bootstrap_servers = module.msk_cluster.bootstrap_brokers_tls
 
       vpc {
-        security_groups = [aws_security_group.example.id]
+        security_groups = [module.msk_sg.id]
         subnets = [
           module.public_subnets.subnets[0].id,
           module.public_subnets.subnets[1].id,
@@ -581,8 +574,9 @@ resource "aws_mskconnect_connector" "s3_sink_connector" {
     "connector.class" = "io.confluent.connect.s3.S3SinkConnector"
     "topics"          = "change-data-capture-postgres"
     "s3.region"       = var.aws_region
-    "s3.bucket.name"  = "${module.source_db.name}"
+    "s3.bucket.name"  = "${module.destination_bucket.bucket}"
     "format.class"    = "io.confluent.connect.s3.format.json.JsonFormat"
+    "tasks.max"       = "1"
   }
 
   kafka_cluster {
@@ -590,7 +584,7 @@ resource "aws_mskconnect_connector" "s3_sink_connector" {
       bootstrap_servers = module.msk_cluster.bootstrap_brokers_tls
 
       vpc {
-        security_groups = [aws_security_group.example.id]
+        security_groups = [module.msk_sg.id]
         subnets = [
           module.public_subnets.subnets[0].id,
           module.public_subnets.subnets[1].id,
@@ -608,7 +602,7 @@ resource "aws_mskconnect_connector" "s3_sink_connector" {
     encryption_type = "TLS"
   }
 
-  plugin {
+  plugin {    
     custom_plugin {
       arn      = aws_mskconnect_custom_plugin.s3_sink_plugin.arn
       revision = aws_mskconnect_custom_plugin.s3_sink_plugin.latest_revision
