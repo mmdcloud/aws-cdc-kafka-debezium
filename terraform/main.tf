@@ -3,6 +3,10 @@ data "vault_generic_secret" "rds" {
   path = "secret/rds"
 }
 
+resource "random_id" "random" {
+  byte_length = 8
+}
+
 # -----------------------------------------------------------------------------------------
 # VPC Configuration
 # -----------------------------------------------------------------------------------------
@@ -224,7 +228,7 @@ module "msk_cluster" {
   encryption_in_transit_client_broker = "TLS_PLAINTEXT"
   configuration_name                  = "cdc-demo-config"
   configuration_kafka_versions        = ["2.8.1"]
-  configuration_server_properties      = <<PROPERTIES
+  configuration_server_properties     = <<PROPERTIES
 auto.create.topics.enable=true
 delete.topic.enable=true
 log.retention.hours=168
@@ -247,7 +251,7 @@ PROPERTIES
 
 module "destination_bucket" {
   source             = "./modules/s3"
-  bucket_name        = "cdcdestinationbucket"
+  bucket_name        = "cdcdestinationbucket-${random_id.random.hex}"
   objects            = []
   versioning_enabled = "Enabled"
   cors = [
@@ -274,7 +278,7 @@ module "destination_bucket" {
 
 module "plugins_bucket" {
   source      = "./modules/s3"
-  bucket_name = "cdcdebeziumplugins"
+  bucket_name = "cdcdebeziumplugins-${random_id.random.hex}"
   objects = [
     {
       key    = "debezium-postgres-connector.zip"
@@ -391,6 +395,18 @@ resource "aws_iam_policy" "debezium_connector_policy" {
         Effect = "Allow",
         Action = [
           "secretsmanager:GetSecretValue"
+        ],
+        Resource = "*"
+      },
+      {
+        Effect = "Allow",
+        Action = [
+          "ec2:CreateNetworkInterface",
+          "ec2:DescribeNetworkInterfaces",
+          "ec2:DeleteNetworkInterface",
+          "ec2:DescribeSubnets",
+          "ec2:DescribeSecurityGroups",
+          "ec2:DescribeVpcs"
         ],
         Resource = "*"
       }
