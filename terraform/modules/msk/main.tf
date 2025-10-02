@@ -38,7 +38,7 @@ resource "aws_msk_cluster" "cluster" {
 }
 
 resource "aws_msk_configuration" "cdc_config" {
-  kafka_versions = var.configuraion_kafka_versions
-  name           = var.configuraion_name
-  server_properties = var.configuraion_server_properties
+  kafka_versions = var.configuration_kafka_versions
+  name           = var.configuration_name
+  server_properties = var.configuration_server_properties
 }

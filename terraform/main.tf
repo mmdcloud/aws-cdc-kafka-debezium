@@ -56,15 +56,6 @@ module "msk_sg" {
       cidr_blocks     = ["0.0.0.0/0"]
       security_groups = []
       description     = "any"
-    },
-    {
-      from_port       = 0
-      to_port         = 0
-      protocol        = "tcp"
-      self            = "false"
-      cidr_blocks     = ["0.0.0.0/0"]
-      security_groups = []
-      description     = "any"
     }
   ]
   egress = [
@@ -194,6 +185,10 @@ module "source_db" {
   parameter_group_name                  = "cdc-postgres17-params"
   parameter_group_family                = "postgres17"
   parameters = [
+    {
+      name  = "rds.logical_replication"
+      value = "1"
+    }
     # {
     #   name  = "wal_sender_timeout"
     #   value = "0"
@@ -227,9 +222,9 @@ module "msk_cluster" {
   security_groups                     = [module.msk_sg.id]
   ebs_volume_size                     = 100
   encryption_in_transit_client_broker = "TLS_PLAINTEXT"
-  configuraion_name                   = "cdc-demo-config"
-  configuraion_kafka_versions         = ["2.8.1"]
-  configuraion_server_properties      = <<PROPERTIES
+  configuration_name                  = "cdc-demo-config"
+  configuration_kafka_versions        = ["2.8.1"]
+  configuration_server_properties      = <<PROPERTIES
 auto.create.topics.enable=true
 delete.topic.enable=true
 log.retention.hours=168
@@ -324,7 +319,7 @@ resource "aws_mskconnect_custom_plugin" "debezium_postgres_plugin" {
       file_key   = "debezium-postgres-connector.zip"
     }
   }
-  depends_on = [ module.plugins_bucket ]
+  depends_on = [module.plugins_bucket]
 }
 
 # MSK Connect Custom Plugin - S3 sink connector
@@ -338,7 +333,7 @@ resource "aws_mskconnect_custom_plugin" "s3_sink_plugin" {
       file_key   = "s3-sink.zip"
     }
   }
-  depends_on = [ module.plugins_bucket ]
+  depends_on = [module.plugins_bucket]
 }
 
 resource "aws_iam_role" "debezium_connector_role" {
@@ -505,15 +500,17 @@ resource "aws_mskconnect_connector" "debezium_postgres_connector" {
   }
 
   connector_configuration = {
-    "connector.class"   = "io.debezium.connector.postgresql.PostgresConnector"
-    "database.hostname" = "${module.source_db.endpoint}"
-    "database.port"     = 5432
-    "plugin.name"       = "pgoutput"
-    "slot.name"         = "debezium"
-    "publication.name"  = "debezium_pub"
-    "database.user"     = tostring(data.vault_generic_secret.rds.data["username"])
-    "database.password" = tostring(data.vault_generic_secret.rds.data["password"])
-    "tasks.max"       = "1"
+    "connector.class"      = "io.debezium.connector.postgresql.PostgresConnector"
+    "database.hostname"    = "${split(":", module.source_db.endpoint)[0]}"
+    "database.port"        = 5432
+    "database.dbname"      = "cdcsourcedb"
+    "database.server.name" = "postgres-cdc"
+    "plugin.name"          = "pgoutput"
+    "slot.name"            = "debezium"
+    "publication.name"     = "debezium_pub"
+    "database.user"        = tostring(data.vault_generic_secret.rds.data["username"])
+    "database.password"    = tostring(data.vault_generic_secret.rds.data["password"])
+    "tasks.max"            = "1"
   }
 
   kafka_cluster {
@@ -547,6 +544,8 @@ resource "aws_mskconnect_connector" "debezium_postgres_connector" {
   }
 
   service_execution_role_arn = aws_iam_role.debezium_connector_role.arn
+
+  depends_on = [module.msk_cluster]
 }
 
 resource "aws_mskconnect_connector" "s3_sink_connector" {
@@ -571,12 +570,15 @@ resource "aws_mskconnect_connector" "s3_sink_connector" {
   }
 
   connector_configuration = {
-    "connector.class" = "io.confluent.connect.s3.S3SinkConnector"
-    "topics"          = "change-data-capture-postgres"
-    "s3.region"       = var.aws_region
-    "s3.bucket.name"  = "${module.destination_bucket.bucket}"
-    "format.class"    = "io.confluent.connect.s3.format.json.JsonFormat"
-    "tasks.max"       = "1"
+    "connector.class"    = "io.confluent.connect.s3.S3SinkConnector"
+    "topics.regex"       = "postgres-cdc.*"
+    "s3.region"          = var.aws_region
+    "s3.bucket.name"     = "${module.destination_bucket.bucket}"
+    "format.class"       = "io.confluent.connect.s3.format.json.JsonFormat"
+    "tasks.max"          = "1"
+    "flush.size"         = "1000"
+    "rotate.interval.ms" = "60000"
+    "storage.class"      = "io.confluent.connect.s3.storage.S3Storage"
   }
 
   kafka_cluster {
@@ -602,7 +604,7 @@ resource "aws_mskconnect_connector" "s3_sink_connector" {
     encryption_type = "TLS"
   }
 
-  plugin {    
+  plugin {
     custom_plugin {
       arn      = aws_mskconnect_custom_plugin.s3_sink_plugin.arn
       revision = aws_mskconnect_custom_plugin.s3_sink_plugin.latest_revision
@@ -610,4 +612,6 @@ resource "aws_mskconnect_connector" "s3_sink_connector" {
   }
 
   service_execution_role_arn = aws_iam_role.s3_sink_role.arn
+
+  depends_on = [module.msk_cluster]
 }

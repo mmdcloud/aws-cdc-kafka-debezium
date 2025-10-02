@@ -6,6 +6,6 @@ variable "client_subnets"{}
 variable "security_groups"{}
 variable "ebs_volume_size"{}
 variable "encryption_in_transit_client_broker"{}
-variable "configuraion_kafka_versions"{}
-variable "configuraion_name"{}
-variable "configuraion_server_properties"{} 
+variable "configuration_kafka_versions"{}
+variable "configuration_name"{}
+variable "configuration_server_properties"{} 
