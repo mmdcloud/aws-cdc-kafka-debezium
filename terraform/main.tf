@@ -192,24 +192,53 @@ module "source_db" {
     {
       name  = "rds.logical_replication"
       value = "1"
+    },
+    {
+      name  = "wal_sender_timeout"
+      value = "0"
+    },
+    {
+      name  = "max_replication_slots"
+      value = "10"
+    },
+    {
+      name  = "max_wal_senders"
+      value = "10"
     }
-    # {
-    #   name  = "wal_sender_timeout"
-    #   value = "0"
-    # },
-    # {
-    #   name  = "max_replication_slots"
-    #   value = "10"
-    # },
-    # {
-    #   name  = "max_wal_senders"
-    #   value = "10"
-    # },
-    # {
-    #   name  = "max_connections"
-    #   value = "500"
-    # }
   ]
+}
+
+# -----------------------------------------------------------------------------------------
+# Setting up replication slots and publication
+# -----------------------------------------------------------------------------------------
+
+resource "null_resource" "setup_postgres_cdc" {
+  # Trigger when RDS endpoint changes
+  triggers = {
+    db_endpoint = module.source_db.endpoint
+  }
+
+  # Wait for RDS to be available
+  depends_on = [module.source_db]
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      # Wait for RDS to be fully ready
+      sleep 60
+      
+      # Set password as environment variable for security
+      export PGPASSWORD='${data.vault_generic_secret.rds.data["password"]}'
+      
+      # Connect and create publication and slot
+      psql -h ${split(":", module.source_db.endpoint)[0]} \
+           -U ${data.vault_generic_secret.rds.data["username"]} \
+           -d cdcsourcedb \
+           -c "CREATE PUBLICATION debezium_pub FOR ALL TABLES;" \
+           -c "SELECT pg_create_logical_replication_slot('debezium', 'pgoutput');"
+      
+      unset PGPASSWORD
+    EOT
+  }
 }
 
 # -----------------------------------------------------------------------------------------
@@ -312,6 +341,10 @@ module "plugins_bucket" {
   }
 }
 
+# -----------------------------------------------------------------------------------------
+# MSK Connector Plugins
+# -----------------------------------------------------------------------------------------
+
 # MSK Connect Custom Plugin - Debezium source connector
 resource "aws_mskconnect_custom_plugin" "debezium_postgres_plugin" {
   name         = "debezium-postgres-plugin"
@@ -339,6 +372,10 @@ resource "aws_mskconnect_custom_plugin" "s3_sink_plugin" {
   }
   depends_on = [module.plugins_bucket]
 }
+
+# -----------------------------------------------------------------------------------------
+# IAM roles for MSK Connectors
+# -----------------------------------------------------------------------------------------
 
 resource "aws_iam_role" "debezium_connector_role" {
   name = "debezium-connector-role"
@@ -505,6 +542,9 @@ resource "aws_iam_role_policy_attachment" "attach_s3_sink_policy" {
   policy_arn = aws_iam_policy.s3_sink_policy.arn
 }
 
+# -----------------------------------------------------------------------------------------
+# MSK Connectors
+# -----------------------------------------------------------------------------------------
 
 resource "aws_mskconnect_connector" "debezium_postgres_connector" {
   name = "debezium-postgres-connector"
