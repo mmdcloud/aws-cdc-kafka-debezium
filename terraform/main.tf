@@ -1,8 +1,13 @@
+# -----------------------------------------------------------------------------------------
 # Registering vault provider
+# -----------------------------------------------------------------------------------------
 data "vault_generic_secret" "rds" {
   path = "secret/rds"
 }
 
+# -----------------------------------------------------------------------------------------
+# Random configuration
+# -----------------------------------------------------------------------------------------
 resource "random_id" "random" {
   byte_length = 8
 }
@@ -10,140 +15,78 @@ resource "random_id" "random" {
 # -----------------------------------------------------------------------------------------
 # VPC Configuration
 # -----------------------------------------------------------------------------------------
-
 module "vpc" {
-  source                = "./modules/vpc/vpc"
-  vpc_name              = "cdc-vpc"
-  vpc_cidr_block        = "10.0.0.0/16"
-  enable_dns_hostnames  = true
-  enable_dns_support    = true
-  internet_gateway_name = "cdc-vpc-igw"
+  source = "./modules/vpc"
+  vpc_name = "cdc-vpc"
+  vpc_cidr = "10.0.0.0/16"
+  azs             = var.azs
+  public_subnets  = var.public_subnets
+  private_subnets = var.private_subnets
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+  create_igw = true
+  map_public_ip_on_launch = true
+  enable_nat_gateway     = false
+  single_nat_gateway     = false
+  one_nat_gateway_per_az = false
+  tags = {
+    Project     = "cdc"
+  }
 }
 
-# RDS Security Group                                                                        
-module "rds_sg" {
-  source = "./modules/vpc/security_groups"
-  vpc_id = module.vpc.vpc_id
-  name   = "rds-sg"
-  ingress = [
-    {
-      from_port       = 5432
-      to_port         = 5432
-      protocol        = "tcp"
-      self            = "false"
-      cidr_blocks     = ["0.0.0.0/0"]
-      security_groups = []
-      description     = "any"
-    }
-  ]
-  egress = [
-    {
-      from_port   = 0
-      to_port     = 0
-      protocol    = "-1"
-      cidr_blocks = ["0.0.0.0/0"]
-    }
-  ]
-}
+# RDS Security Group    
+resource "aws_security_group" "rds_sg" {
+  name        = "rds-sg"
+  vpc_id      = module.vpc.vpc_id
+
+  ingress {
+    description = "PostgreSQL traffic"
+    from_port   = 5432
+    to_port     = 5432
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "rds-sg"
+  }
+}                                                                    
 
 # MSK Security Group
-module "msk_sg" {
-  source = "./modules/vpc/security_groups"
-  vpc_id = module.vpc.vpc_id
-  name   = "msk-sg"
-  ingress = [
-    {
-      from_port       = 9092
-      to_port         = 9098
-      protocol        = "tcp"
-      self            = "false"
-      cidr_blocks     = ["0.0.0.0/0"]
-      security_groups = []
-      description     = "any"
-    }
-  ]
-  egress = [
-    {
-      from_port   = 0
-      to_port     = 0
-      protocol    = "-1"
-      cidr_blocks = ["0.0.0.0/0"]
-    }
-  ]
-}
+resource "aws_security_group" "msk_sg" {
+  name        = "msk-sg"
+  vpc_id      = module.vpc.vpc_id
 
-# Public Subnets
-module "public_subnets" {
-  source = "./modules/vpc/subnets"
-  name   = "public-subnet"
-  subnets = [
-    {
-      subnet = "10.0.1.0/24"
-      az     = "us-east-1a"
-    },
-    {
-      subnet = "10.0.2.0/24"
-      az     = "us-east-1b"
-    },
-    {
-      subnet = "10.0.3.0/24"
-      az     = "us-east-1c"
-    }
-  ]
-  vpc_id                  = module.vpc.vpc_id
-  map_public_ip_on_launch = true
-}
+  ingress {
+    description = "MSK traffic"
+    from_port   = 9092
+    to_port     = 9098
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 
-# Private Subnets
-module "private_subnets" {
-  source = "./modules/vpc/subnets"
-  name   = "private-subnet"
-  subnets = [
-    {
-      subnet = "10.0.4.0/24"
-      az     = "us-east-1a"
-    },
-    {
-      subnet = "10.0.5.0/24"
-      az     = "us-east-1b"
-    },
-    {
-      subnet = "10.0.6.0/24"
-      az     = "us-east-1c"
-    }
-  ]
-  vpc_id                  = module.vpc.vpc_id
-  map_public_ip_on_launch = false
-}
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 
-# Public Route Table
-module "public_rt" {
-  source  = "./modules/vpc/route_tables"
-  name    = "public-route-table"
-  subnets = module.public_subnets.subnets[*]
-  routes = [
-    {
-      cidr_block     = "0.0.0.0/0"
-      gateway_id     = module.vpc.igw_id
-      nat_gateway_id = ""
-    }
-  ]
-  vpc_id = module.vpc.vpc_id
-}
-
-# Private Route Table
-module "private_rt" {
-  source  = "./modules/vpc/route_tables"
-  name    = "private-route-table"
-  subnets = module.private_subnets.subnets[*]
-  routes  = []
-  vpc_id  = module.vpc.vpc_id
+  tags = {
+    Name = "msk-sg"
+  }
 }
 
 # -----------------------------------------------------------------------------------------
 # Secrets Manager
 # -----------------------------------------------------------------------------------------
-
 module "db_credentials" {
   source                  = "./modules/secrets-manager"
   name                    = "rds-secrets"
@@ -158,7 +101,6 @@ module "db_credentials" {
 # -----------------------------------------------------------------------------------------
 # RDS Instance
 # -----------------------------------------------------------------------------------------
-
 module "source_db" {
   source            = "./modules/rds"
   db_name           = "cdcsourcedb"
@@ -175,11 +117,11 @@ module "source_db" {
   backup_window           = "03:00-06:00"
   maintenance_window      = "Mon:00:00-Mon:03:00"
   subnet_group_ids = [
-    module.public_subnets.subnets[0].id,
-    module.public_subnets.subnets[1].id,
-    module.public_subnets.subnets[2].id
+    module.vpc.public_subnets[0],
+    module.vpc.public_subnets[1],
+    module.vpc.public_subnets[2]
   ]
-  vpc_security_group_ids                = [module.rds_sg.id]
+  vpc_security_group_ids                = [aws_security_group.rds_sg.id]
   publicly_accessible                   = true
   deletion_protection                   = false
   skip_final_snapshot                   = true
@@ -211,7 +153,6 @@ module "source_db" {
 # -----------------------------------------------------------------------------------------
 # Setting up replication slots and publication
 # -----------------------------------------------------------------------------------------
-
 resource "null_resource" "setup_postgres_cdc" {
   # Trigger when RDS endpoint changes
   triggers = {
@@ -244,15 +185,14 @@ resource "null_resource" "setup_postgres_cdc" {
 # -----------------------------------------------------------------------------------------
 # MSK Cluster
 # -----------------------------------------------------------------------------------------
-
 module "msk_cluster" {
   source                              = "./modules/msk"
   cluster_name                        = "cdc-cluster"
   kafka_version                       = "2.8.1"
   number_of_broker_nodes              = 3
   instance_type                       = "kafka.m5.large"
-  client_subnets                      = module.public_subnets.subnets[*].id
-  security_groups                     = [module.msk_sg.id]
+  client_subnets                      = module.vpc.public_subnets
+  security_groups                     = [aws_security_group.msk_sg.id]
   ebs_volume_size                     = 100
   encryption_in_transit_client_broker = "TLS_PLAINTEXT"
   configuration_name                  = "cdc-demo-config"
@@ -277,7 +217,6 @@ PROPERTIES
 # -----------------------------------------------------------------------------------------
 # S3 Configuration
 # -----------------------------------------------------------------------------------------
-
 module "destination_bucket" {
   source             = "./modules/s3"
   bucket_name        = "cdcdestinationbucket-${random_id.random.hex}"
@@ -376,7 +315,6 @@ resource "aws_mskconnect_custom_plugin" "s3_sink_plugin" {
 # -----------------------------------------------------------------------------------------
 # IAM roles for MSK Connectors
 # -----------------------------------------------------------------------------------------
-
 resource "aws_iam_role" "debezium_connector_role" {
   name = "debezium-connector-role"
 
@@ -545,7 +483,6 @@ resource "aws_iam_role_policy_attachment" "attach_s3_sink_policy" {
 # -----------------------------------------------------------------------------------------
 # MSK Connectors
 # -----------------------------------------------------------------------------------------
-
 resource "aws_mskconnect_connector" "debezium_postgres_connector" {
   name = "debezium-postgres-connector"
 
@@ -586,11 +523,11 @@ resource "aws_mskconnect_connector" "debezium_postgres_connector" {
       bootstrap_servers = module.msk_cluster.bootstrap_brokers_tls
 
       vpc {
-        security_groups = [module.msk_sg.id]
+        security_groups = [aws_security_group.msk_sg.id]
         subnets = [
-          module.public_subnets.subnets[0].id,
-          module.public_subnets.subnets[1].id,
-          module.public_subnets.subnets[2].id
+          module.vpc.public_subnets[0],
+          module.vpc.public_subnets[1],
+          module.vpc.public_subnets[2]
         ]
       }
     }
@@ -654,11 +591,11 @@ resource "aws_mskconnect_connector" "s3_sink_connector" {
       bootstrap_servers = module.msk_cluster.bootstrap_brokers_tls
 
       vpc {
-        security_groups = [module.msk_sg.id]
+        security_groups = [aws_security_group.msk_sg.id]
         subnets = [
-          module.public_subnets.subnets[0].id,
-          module.public_subnets.subnets[1].id,
-          module.public_subnets.subnets[2].id
+          module.vpc.public_subnets[0],
+          module.vpc.public_subnets[1],
+          module.vpc.public_subnets[2]
         ]
       }
     }
