@@ -16,28 +16,28 @@ resource "random_id" "random" {
 # VPC Configuration
 # -----------------------------------------------------------------------------------------
 module "vpc" {
-  source = "./modules/vpc"
-  vpc_name = "cdc-vpc"
-  vpc_cidr = "10.0.0.0/16"
-  azs             = var.azs
-  public_subnets  = var.public_subnets
-  private_subnets = var.private_subnets
-  enable_dns_hostnames = true
-  enable_dns_support   = true
-  create_igw = true
+  source                  = "./modules/vpc"
+  vpc_name                = "cdc-vpc"
+  vpc_cidr                = "10.0.0.0/16"
+  azs                     = var.azs
+  public_subnets          = var.public_subnets
+  private_subnets         = var.private_subnets
+  enable_dns_hostnames    = true
+  enable_dns_support      = true
+  create_igw              = true
   map_public_ip_on_launch = true
-  enable_nat_gateway     = false
-  single_nat_gateway     = false
-  one_nat_gateway_per_az = false
+  enable_nat_gateway      = false
+  single_nat_gateway      = false
+  one_nat_gateway_per_az  = false
   tags = {
-    Project     = "cdc"
+    Project = "cdc"
   }
 }
 
 # RDS Security Group    
 resource "aws_security_group" "rds_sg" {
-  name        = "rds-sg"
-  vpc_id      = module.vpc.vpc_id
+  name   = "rds-sg"
+  vpc_id = module.vpc.vpc_id
 
   ingress {
     description = "PostgreSQL traffic"
@@ -57,12 +57,12 @@ resource "aws_security_group" "rds_sg" {
   tags = {
     Name = "rds-sg"
   }
-}                                                                    
+}
 
 # MSK Security Group
 resource "aws_security_group" "msk_sg" {
-  name        = "msk-sg"
-  vpc_id      = module.vpc.vpc_id
+  name   = "msk-sg"
+  vpc_id = module.vpc.vpc_id
 
   ingress {
     description = "MSK traffic"
@@ -154,12 +154,10 @@ module "source_db" {
 # Setting up replication slots and publication
 # -----------------------------------------------------------------------------------------
 resource "null_resource" "setup_postgres_cdc" {
-  # Trigger when RDS endpoint changes
   triggers = {
     db_endpoint = module.source_db.endpoint
   }
 
-  # Wait for RDS to be available
   depends_on = [module.source_db]
 
   provisioner "local-exec" {
@@ -283,8 +281,6 @@ module "plugins_bucket" {
 # -----------------------------------------------------------------------------------------
 # MSK Connector Plugins
 # -----------------------------------------------------------------------------------------
-
-# MSK Connect Custom Plugin - Debezium source connector
 resource "aws_mskconnect_custom_plugin" "debezium_postgres_plugin" {
   name         = "debezium-postgres-plugin"
   content_type = "ZIP"
@@ -298,7 +294,6 @@ resource "aws_mskconnect_custom_plugin" "debezium_postgres_plugin" {
   depends_on = [module.plugins_bucket]
 }
 
-# MSK Connect Custom Plugin - S3 sink connector
 resource "aws_mskconnect_custom_plugin" "s3_sink_plugin" {
   name         = "s3-sink-plugin"
   content_type = "ZIP"
@@ -315,169 +310,167 @@ resource "aws_mskconnect_custom_plugin" "s3_sink_plugin" {
 # -----------------------------------------------------------------------------------------
 # IAM roles for MSK Connectors
 # -----------------------------------------------------------------------------------------
-resource "aws_iam_role" "debezium_connector_role" {
-  name = "debezium-connector-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17",
-    Statement = [{
-      Effect = "Allow",
-      Principal = {
-        Service = "kafkaconnect.amazonaws.com"
-      },
-      Action = "sts:AssumeRole"
-    }]
-  })
-}
-
-resource "aws_iam_policy" "debezium_connector_policy" {
-  name        = "debezium-connector-policy"
-  description = "Policy for Debezium connector service execution role"
-
-  policy = jsonencode({
-    Version = "2012-10-17",
-    Statement = [
-      {
-        Effect = "Allow",
-        Action = [
-          "kafka:DescribeCluster",
-          "kafka:DescribeTopic",
-          "kafka:GetBootstrapBrokers",
-          "kafka:CreateTopic",
-          "kafka:DeleteTopic",
-          "kafka:DescribeGroup",
-          "kafka:ListGroups",
-          "kafka:AlterCluster",
-          "kafka:AlterGroup",
-          "kafka:Connect",
-          "kafka:ReadData",
-          "kafka:WriteData"
-        ],
-        Resource = "${module.msk_cluster.arn}"
-      },
-      {
-        Effect = "Allow",
-        Action = [
-          "logs:CreateLogGroup",
-          "logs:CreateLogStream",
-          "logs:PutLogEvents",
-          "logs:DescribeLogGroups",
-          "logs:DescribeLogStreams"
-        ],
-        Resource = "*"
-      },
-      {
-        Effect = "Allow",
-        Action = [
-          "secretsmanager:GetSecretValue"
-        ],
-        Resource = "*"
-      },
-      {
-        Effect = "Allow",
-        Action = [
-          "ec2:CreateNetworkInterface",
-          "ec2:DescribeNetworkInterfaces",
-          "ec2:DeleteNetworkInterface",
-          "ec2:DescribeSubnets",
-          "ec2:DescribeSecurityGroups",
-          "ec2:DescribeVpcs"
-        ],
-        Resource = "*"
-      }
-    ]
-  })
-}
-
-resource "aws_iam_role_policy_attachment" "attach_debezium_connector_policy" {
-  role       = aws_iam_role.debezium_connector_role.name
-  policy_arn = aws_iam_policy.debezium_connector_policy.arn
-}
-
-resource "aws_iam_role" "s3_sink_role" {
-  name = "s3-sink-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17",
-    Statement = [{
-      Effect = "Allow",
-      Principal = {
-        Service = "kafkaconnect.amazonaws.com"
-      },
-      Action = "sts:AssumeRole"
-    }]
-  })
-}
-
-resource "aws_iam_policy" "s3_sink_policy" {
-  name        = "s3-sink-policy"
-  description = "Policy for S3 sink connector service execution role"
-
-  policy = jsonencode({
-    Version = "2012-10-17",
-    Statement = [
-      {
-        Effect = "Allow",
-        Action = [
-          "kafka:DescribeCluster",
-          "kafka:DescribeTopic",
-          "kafka:GetBootstrapBrokers",
-          "kafka:CreateTopic",
-          "kafka:DeleteTopic",
-          "kafka:DescribeGroup",
-          "kafka:ListGroups",
-          "kafka:AlterCluster",
-          "kafka:AlterGroup",
-          "kafka:Connect",
-          "kafka:ReadData",
-          "kafka:WriteData"
-        ],
-        Resource = "${module.msk_cluster.arn}"
-      },
-      {
-        Effect = "Allow",
-        Action = [
-          "s3:PutObject",
-          "s3:GetObject",
-          "s3:ListBucket",
-          "s3:AbortMultipartUpload",
-          "s3:GetBucketLocation"
-        ],
-        Resource = [
-          "${module.destination_bucket.arn}",
-          "${module.destination_bucket.arn}/*"
+module "debezium_connector_role" {
+  source             = "./modules/iam"
+  role_name          = "debezium-connector-role"
+  role_description   = "IAM role for Debezium MSK Connector"
+  policy_name        = "debezium-connector-policy"
+  policy_description = "IAM policy for Debezium MSK Connector"
+  assume_role_policy = <<EOF
+    {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Action": "sts:AssumeRole",
+                "Principal": {
+                  "Service": "kafkaconnect.amazonaws.com"
+                },
+                "Effect": "Allow",
+                "Sid": ""
+            }
         ]
-      },
-      {
-        Effect = "Allow",
-        Action = [
-          "logs:CreateLogGroup",
-          "logs:CreateLogStream",
-          "logs:PutLogEvents",
-          "logs:DescribeLogGroups",
-          "logs:DescribeLogStreams"
-        ],
-        Resource = "*"
-      },
-      {
-        Effect = "Allow",
-        Action = [
-          "ec2:CreateNetworkInterface",
-          "ec2:DescribeNetworkInterfaces",
-          "ec2:DeleteNetworkInterface",
-          "ec2:DescribeSubnets",
-          "ec2:DescribeSecurityGroups",
-          "ec2:DescribeVpcs"
-        ],
-        Resource = "*"
-      }
-    ]
-  })
+    }
+    EOF
+  policy             = <<EOF
+    {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Action": [
+                  "kafka:DescribeCluster",
+                  "kafka:DescribeTopic",
+                  "kafka:GetBootstrapBrokers",
+                  "kafka:CreateTopic",
+                  "kafka:DeleteTopic",
+                  "kafka:DescribeGroup",
+                  "kafka:ListGroups",
+                  "kafka:AlterCluster",
+                  "kafka:AlterGroup",
+                  "kafka:Connect",
+                  "kafka:ReadData",
+                  "kafka:WriteData"
+                ],
+                "Resource": "${module.msk_cluster.arn}",
+                "Effect": "Allow"
+            },
+            {
+                "Action": [
+                  "logs:CreateLogGroup",
+                  "logs:CreateLogStream",
+                  "logs:PutLogEvents",
+                  "logs:DescribeLogGroups",
+                  "logs:DescribeLogStreams"
+                ],
+                "Resource": "*",
+                "Effect": "Allow"
+            },
+            {
+                "Action": [
+                  "secretsmanager:GetSecretValue"
+                ],
+                "Resource": "*",
+                "Effect": "Allow"
+            },
+            {
+                "Action": [
+                  "ec2:CreateNetworkInterface",
+                  "ec2:DescribeNetworkInterfaces",
+                  "ec2:DeleteNetworkInterface",
+                  "ec2:DescribeSubnets",
+                  "ec2:DescribeSecurityGroups",
+                  "ec2:DescribeVpcs"
+                ],
+                "Resource": "*",
+                "Effect": "Allow"
+            }
+        ]
+    }
+    EOF
 }
 
-resource "aws_iam_role_policy_attachment" "attach_s3_sink_policy" {
-  role       = aws_iam_role.s3_sink_role.name
-  policy_arn = aws_iam_policy.s3_sink_policy.arn
+module "s3_sink_role" {
+  source             = "./modules/iam"
+  role_name          = "s3-sink-role"
+  role_description   = "IAM role for S3 Sink Connector"
+  policy_name        = "s3-sink-policy"
+  policy_description = "IAM policy for S3 Sink Connector"
+  assume_role_policy = <<EOF
+    {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Action": "sts:AssumeRole",
+                "Principal": {
+                  "Service": "s3.amazonaws.com"
+                },
+                "Effect": "Allow",
+                "Sid": ""
+            }
+        ]
+    }
+    EOF
+  policy             = <<EOF
+    {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Action": [
+                  "kafka:DescribeCluster",
+                  "kafka:DescribeTopic",
+                  "kafka:GetBootstrapBrokers",
+                  "kafka:CreateTopic",
+                  "kafka:DeleteTopic",
+                  "kafka:DescribeGroup",
+                  "kafka:ListGroups",
+                  "kafka:AlterCluster",
+                  "kafka:AlterGroup",
+                  "kafka:Connect",
+                  "kafka:ReadData",
+                  "kafka:WriteData"
+                ],
+                "Resource": "${module.msk_cluster.arn}",
+                "Effect": "Allow"
+            },
+            {
+                "Action": [
+                  "s3:PutObject",
+                  "s3:GetObject",
+                  "s3:ListBucket",
+                  "s3:AbortMultipartUpload",
+                  "s3:GetBucketLocation"
+                ],
+                "Resource": [
+                  "${module.destination_bucket.arn}",
+                  "${module.destination_bucket.arn}/*"
+                ],
+                "Effect": "Allow"
+            },
+            {
+                "Action": [
+                  "logs:CreateLogGroup",
+                  "logs:CreateLogStream",
+                  "logs:PutLogEvents",
+                  "logs:DescribeLogGroups",
+                  "logs:DescribeLogStreams"
+                ],
+                "Resource": "*",
+                "Effect": "Allow"
+            },
+            {
+                "Action": [
+                  "ec2:CreateNetworkInterface",
+                  "ec2:DescribeNetworkInterfaces",
+                  "ec2:DeleteNetworkInterface",
+                  "ec2:DescribeSubnets",
+                  "ec2:DescribeSecurityGroups",
+                  "ec2:DescribeVpcs"
+                ],
+                "Resource": "*",
+                "Effect": "Allow"
+            }
+        ]
+    }
+    EOF
 }
 
 # -----------------------------------------------------------------------------------------
@@ -548,7 +541,7 @@ resource "aws_mskconnect_connector" "debezium_postgres_connector" {
     }
   }
 
-  service_execution_role_arn = aws_iam_role.debezium_connector_role.arn
+  service_execution_role_arn = module.debezium_connector_role.arn
 
   depends_on = [module.msk_cluster]
 }
@@ -616,7 +609,7 @@ resource "aws_mskconnect_connector" "s3_sink_connector" {
     }
   }
 
-  service_execution_role_arn = aws_iam_role.s3_sink_role.arn
+  service_execution_role_arn = module.s3_sink_role.arn
 
   depends_on = [module.msk_cluster]
 }
