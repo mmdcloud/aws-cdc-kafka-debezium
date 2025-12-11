@@ -186,7 +186,7 @@ resource "null_resource" "setup_postgres_cdc" {
 module "msk_cluster" {
   source                              = "./modules/msk"
   cluster_name                        = "cdc-cluster"
-  kafka_version                       = "2.8.1"
+  kafka_version                       = "4.1.1.kraft"
   number_of_broker_nodes              = 3
   instance_type                       = "kafka.m5.large"
   client_subnets                      = module.vpc.public_subnets
@@ -194,7 +194,7 @@ module "msk_cluster" {
   ebs_volume_size                     = 100
   encryption_in_transit_client_broker = "TLS_PLAINTEXT"
   configuration_name                  = "cdc-demo-config"
-  configuration_kafka_versions        = ["2.8.1"]
+  configuration_kafka_versions        = ["4.1.1.kraft"]
   configuration_server_properties     = <<PROPERTIES
 auto.create.topics.enable=true
 delete.topic.enable=true
@@ -476,31 +476,14 @@ module "s3_sink_role" {
 # -----------------------------------------------------------------------------------------
 # MSK Connectors
 # -----------------------------------------------------------------------------------------
-resource "aws_mskconnect_connector" "debezium_postgres_connector" {
-  name = "debezium-postgres-connector"
-
+module "debezium_postgres_connector" {
+  source = "./modules/msk_connector"
+  name                 = "debezium-postgres-connector"
   kafkaconnect_version = "2.7.1"
-
-  capacity {
-    autoscaling {
-      mcu_count        = 1
-      min_worker_count = 1
-      max_worker_count = 2
-
-      scale_in_policy {
-        cpu_utilization_percentage = 20
-      }
-
-      scale_out_policy {
-        cpu_utilization_percentage = 80
-      }
-    }
-  }
-
   connector_configuration = {
     "connector.class"      = "io.debezium.connector.postgresql.PostgresConnector"
-    "database.hostname"    = "${split(":", module.source_db.endpoint)[0]}"
-    "database.port"        = 5432
+    "database.hostname"    = split(":", module.source_db.endpoint)[0]
+    "database.port"        = "5432"
     "database.dbname"      = "cdcsourcedb"
     "database.server.name" = "postgres-cdc"
     "plugin.name"          = "pgoutput"
@@ -510,106 +493,189 @@ resource "aws_mskconnect_connector" "debezium_postgres_connector" {
     "database.password"    = tostring(data.vault_generic_secret.rds.data["password"])
     "tasks.max"            = "1"
   }
-
-  kafka_cluster {
-    apache_kafka_cluster {
-      bootstrap_servers = module.msk_cluster.bootstrap_brokers_tls
-
-      vpc {
-        security_groups = [aws_security_group.msk_sg.id]
-        subnets = [
-          module.vpc.public_subnets[0],
-          module.vpc.public_subnets[1],
-          module.vpc.public_subnets[2]
-        ]
-      }
-    }
-  }
-
-  kafka_cluster_client_authentication {
-    authentication_type = "NONE"
-  }
-
-  kafka_cluster_encryption_in_transit {
-    encryption_type = "TLS"
-  }
-
-  plugin {
-    custom_plugin {
-      arn      = aws_mskconnect_custom_plugin.debezium_postgres_plugin.arn
-      revision = aws_mskconnect_custom_plugin.debezium_postgres_plugin.latest_revision
-    }
-  }
-
+  bootstrap_servers = module.msk_cluster.bootstrap_brokers_tls
+  security_groups = [
+    aws_security_group.msk_sg.id
+  ]
+  subnets = [
+    module.vpc.public_subnets[0],
+    module.vpc.public_subnets[1],
+    module.vpc.public_subnets[2]
+  ]
+  authentication_type = "NONE"
+  encryption_type     = "TLS"
+  plugin_arn      = aws_mskconnect_custom_plugin.debezium_postgres_plugin.arn
+  plugin_revision = aws_mskconnect_custom_plugin.debezium_postgres_plugin.latest_revision
   service_execution_role_arn = module.debezium_connector_role.arn
-
+  use_autoscaling = true
+  autoscaling = {
+    worker_count     = 1
+    min_worker_count = 1
+    max_worker_count = 2
+    scale_in_cpu     = 20
+    scale_out_cpu    = 80
+  }
   depends_on = [module.msk_cluster]
 }
 
-resource "aws_mskconnect_connector" "s3_sink_connector" {
-  name = "s3-sink-connector"
+# resource "aws_mskconnect_connector" "debezium_postgres_connector" {
+#   name = "debezium-postgres-connector"
 
+#   kafkaconnect_version = "2.7.1"
+
+#   capacity {
+#     autoscaling {
+#       mcu_count        = 1
+#       min_worker_count = 1
+#       max_worker_count = 2
+
+#       scale_in_policy {
+#         cpu_utilization_percentage = 20
+#       }
+
+#       scale_out_policy {
+#         cpu_utilization_percentage = 80
+#       }
+#     }
+#   }
+
+#   connector_configuration = {
+#     "connector.class"      = "io.debezium.connector.postgresql.PostgresConnector"
+#     "database.hostname"    = "${split(":", module.source_db.endpoint)[0]}"
+#     "database.port"        = 5432
+#     "database.dbname"      = "cdcsourcedb"
+#     "database.server.name" = "postgres-cdc"
+#     "plugin.name"          = "pgoutput"
+#     "slot.name"            = "debezium"
+#     "publication.name"     = "debezium_pub"
+#     "database.user"        = tostring(data.vault_generic_secret.rds.data["username"])
+#     "database.password"    = tostring(data.vault_generic_secret.rds.data["password"])
+#     "tasks.max"            = "1"
+#   }
+
+#   kafka_cluster {
+#     apache_kafka_cluster {
+#       bootstrap_servers = module.msk_cluster.bootstrap_brokers_tls
+
+#       vpc {
+#         security_groups = [aws_security_group.msk_sg.id]
+#         subnets = [
+#           module.vpc.public_subnets[0],
+#           module.vpc.public_subnets[1],
+#           module.vpc.public_subnets[2]
+#         ]
+#       }
+#     }
+#   }
+
+#   kafka_cluster_client_authentication {
+#     authentication_type = "NONE"
+#   }
+
+#   kafka_cluster_encryption_in_transit {
+#     encryption_type = "TLS"
+#   }
+
+#   plugin {
+#     custom_plugin {
+#       arn      = aws_mskconnect_custom_plugin.debezium_postgres_plugin.arn
+#       revision = aws_mskconnect_custom_plugin.debezium_postgres_plugin.latest_revision
+#     }
+#   }
+
+#   service_execution_role_arn = module.debezium_connector_role.arn
+
+#   depends_on = [module.msk_cluster]
+# }
+
+module "s3_sink_connector" {
+  source               = "./modules/msk_connector"
+  name                 = "s3-sink-connector"
   kafkaconnect_version = "2.7.1"
-
-  capacity {
-    autoscaling {
-      mcu_count        = 1
-      min_worker_count = 1
-      max_worker_count = 2
-
-      scale_in_policy {
-        cpu_utilization_percentage = 20
-      }
-
-      scale_out_policy {
-        cpu_utilization_percentage = 80
-      }
-    }
-  }
-
   connector_configuration = {
     "connector.class"    = "io.confluent.connect.s3.S3SinkConnector"
     "topics.regex"       = "postgres-cdc.*"
     "s3.region"          = var.aws_region
-    "s3.bucket.name"     = "${module.destination_bucket.bucket}"
+    "s3.bucket.name"     = module.destination_bucket.bucket
     "format.class"       = "io.confluent.connect.s3.format.json.JsonFormat"
     "tasks.max"          = "1"
     "flush.size"         = "1000"
     "rotate.interval.ms" = "60000"
     "storage.class"      = "io.confluent.connect.s3.storage.S3Storage"
   }
-
-  kafka_cluster {
-    apache_kafka_cluster {
-      bootstrap_servers = module.msk_cluster.bootstrap_brokers_tls
-
-      vpc {
-        security_groups = [aws_security_group.msk_sg.id]
-        subnets = [
-          module.vpc.public_subnets[0],
-          module.vpc.public_subnets[1],
-          module.vpc.public_subnets[2]
-        ]
-      }
-    }
-  }
-
-  kafka_cluster_client_authentication {
-    authentication_type = "NONE"
-  }
-
-  kafka_cluster_encryption_in_transit {
-    encryption_type = "TLS"
-  }
-
-  plugin {
-    custom_plugin {
-      arn      = aws_mskconnect_custom_plugin.s3_sink_plugin.arn
-      revision = aws_mskconnect_custom_plugin.s3_sink_plugin.latest_revision
-    }
-  }
-
+  bootstrap_servers = module.msk_cluster.bootstrap_brokers_tls
+  security_groups   = [aws_security_group.msk_sg.id]
+  subnets           = module.vpc.public_subnets
+  authentication_type = "NONE"
+  encryption_type     = "TLS"
+  plugin_arn      = aws_mskconnect_custom_plugin.s3_sink_plugin.arn
+  plugin_revision = aws_mskconnect_custom_plugin.s3_sink_plugin.latest_revision
   service_execution_role_arn = module.s3_sink_role.arn
-
+  use_autoscaling = true
+  autoscaling = {
+    worker_count     = 1
+    min_worker_count = 1
+    max_worker_count = 2
+    scale_in_cpu     = 20
+    scale_out_cpu    = 80
+  }
   depends_on = [module.msk_cluster]
 }
+
+# resource "aws_mskconnect_connector" "s3_sink_connector" {
+#   name = "s3-sink-connector"
+
+#   kafkaconnect_version = "2.7.1"
+
+#   capacity {
+#     autoscaling {
+#       mcu_count        = 1
+#       min_worker_count = 1
+#       max_worker_count = 2
+#       scale_in_policy {
+#         cpu_utilization_percentage = 20
+#       }
+#       scale_out_policy {
+#         cpu_utilization_percentage = 80
+#       }
+#     }
+#   }
+#   connector_configuration = {
+#     "connector.class"    = "io.confluent.connect.s3.S3SinkConnector"
+#     "topics.regex"       = "postgres-cdc.*"
+#     "s3.region"          = var.aws_region
+#     "s3.bucket.name"     = "${module.destination_bucket.bucket}"
+#     "format.class"       = "io.confluent.connect.s3.format.json.JsonFormat"
+#     "tasks.max"          = "1"
+#     "flush.size"         = "1000"
+#     "rotate.interval.ms" = "60000"
+#     "storage.class"      = "io.confluent.connect.s3.storage.S3Storage"
+#   }
+#   kafka_cluster {
+#     apache_kafka_cluster {
+#       bootstrap_servers = module.msk_cluster.bootstrap_brokers_tls
+#       vpc {
+#         security_groups = [aws_security_group.msk_sg.id]
+#         subnets = [
+#           module.vpc.public_subnets[0],
+#           module.vpc.public_subnets[1],
+#           module.vpc.public_subnets[2]
+#         ]
+#       }
+#     }
+#   }
+#   kafka_cluster_client_authentication {
+#     authentication_type = "NONE"
+#   }
+#   kafka_cluster_encryption_in_transit {
+#     encryption_type = "TLS"
+#   }
+#   plugin {
+#     custom_plugin {
+#       arn      = aws_mskconnect_custom_plugin.s3_sink_plugin.arn
+#       revision = aws_mskconnect_custom_plugin.s3_sink_plugin.latest_revision
+#     }
+#   }
+#   service_execution_role_arn = module.s3_sink_role.arn
+#   depends_on                 = [module.msk_cluster]
+# }
