@@ -22,63 +22,72 @@ module "vpc" {
   azs                     = var.azs
   public_subnets          = var.public_subnets
   private_subnets         = var.private_subnets
+  database_subnets        = var.database_subnets
   enable_dns_hostnames    = true
   enable_dns_support      = true
   create_igw              = true
   map_public_ip_on_launch = true
-  enable_nat_gateway      = false
-  single_nat_gateway      = false
+  enable_nat_gateway      = true
+  single_nat_gateway      = true
   one_nat_gateway_per_az  = false
   tags = {
     Project = "cdc"
   }
 }
 
-# RDS Security Group    
-resource "aws_security_group" "rds_sg" {
+# RDS Security Group
+module "rds_sg" {
+  source = "./modules/security-groups"
   name   = "rds-sg"
   vpc_id = module.vpc.vpc_id
-
-  ingress {
-    description = "PostgreSQL traffic"
-    from_port   = 5432
-    to_port     = 5432
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
+  ingress_rules = [
+    {
+      description     = "PostgreSQL Traffic from MSK Connectors"
+      from_port       = 5432
+      to_port         = 5432
+      protocol        = "tcp"
+      security_groups = [module.msk_sg.id]
+      cidr_blocks     = []
+    }
+  ]
+  egress_rules = [
+    {
+      description = "Allow all outbound traffic"
+      from_port   = 0
+      to_port     = 0
+      protocol    = "-1"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
+  ]
   tags = {
     Name = "rds-sg"
   }
 }
 
 # MSK Security Group
-resource "aws_security_group" "msk_sg" {
+module "msk_sg" {
+  source = "./modules/security-groups"
   name   = "msk-sg"
   vpc_id = module.vpc.vpc_id
-
-  ingress {
-    description = "MSK traffic"
-    from_port   = 9092
-    to_port     = 9098
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
+  ingress_rules = [
+    {
+      description     = "MSK Traffic"
+      from_port       = 9092
+      to_port         = 9098
+      protocol        = "tcp"
+      security_groups = []
+      cidr_blocks     = ["0.0.0.0/0"]
+    }
+  ]
+  egress_rules = [
+    {
+      description = "Allow all outbound traffic"
+      from_port   = 0
+      to_port     = 0
+      protocol    = "-1"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
+  ]
   tags = {
     Name = "msk-sg"
   }
@@ -117,12 +126,12 @@ module "source_db" {
   backup_window           = "03:00-06:00"
   maintenance_window      = "Mon:00:00-Mon:03:00"
   subnet_group_ids = [
-    module.vpc.public_subnets[0],
-    module.vpc.public_subnets[1],
-    module.vpc.public_subnets[2]
+    module.vpc.database_subnets[0],
+    module.vpc.database_subnets[1],
+    module.vpc.database_subnets[2]
   ]
-  vpc_security_group_ids                = [aws_security_group.rds_sg.id]
-  publicly_accessible                   = true
+  vpc_security_group_ids                = [module.rds_sg.id]
+  publicly_accessible                   = false
   deletion_protection                   = false
   skip_final_snapshot                   = true
   max_allocated_storage                 = 500
@@ -132,21 +141,42 @@ module "source_db" {
   parameter_group_family                = "postgres17"
   parameters = [
     {
-      name  = "rds.logical_replication"
-      value = "1"
+      name         = "rds.logical_replication"
+      value        = "1"
+      apply_method = "pending-reboot"
     },
     {
-      name  = "wal_sender_timeout"
-      value = "0"
+      name         = "max_replication_slots"
+      value        = "10"
+      apply_method = "pending-reboot"
     },
     {
-      name  = "max_replication_slots"
-      value = "10"
+      name         = "max_wal_senders"
+      value        = "10"
+      apply_method = "pending-reboot"
     },
     {
-      name  = "max_wal_senders"
-      value = "10"
+      name         = "max_worker_processes"
+      value        = "8"
+      apply_method = "pending-reboot"
+    },
+    {
+      name         = "max_logical_replication_workers"
+      value        = "4"
+      apply_method = "pending-reboot"
     }
+    
+    # # DYNAMIC PARAMETERS - No reboot required
+    # {
+    #   name         = "wal_sender_timeout"
+    #   value        = "0"
+    #   apply_method = "immediate"
+    # },
+    # {
+    #   name         = "log_min_duration_statement"
+    #   value        = "1000"
+    #   apply_method = "immediate"
+    # }
   ]
 }
 
@@ -157,25 +187,28 @@ resource "null_resource" "setup_postgres_cdc" {
   triggers = {
     db_endpoint = module.source_db.endpoint
   }
-
   depends_on = [module.source_db]
-
   provisioner "local-exec" {
     command = <<-EOT
-      # Wait for RDS to be fully ready
-      sleep 60
+      cat > ~/.pgpass << EOF
+${split(":", module.source_db.endpoint)[0]}:5432:cdcsourcedb:${data.vault_generic_secret.rds.data["username"]}:${data.vault_generic_secret.rds.data["password"]}
+EOF
+      chmod 600 ~/.pgpass
       
-      # Set password as environment variable for security
-      export PGPASSWORD='${data.vault_generic_secret.rds.data["password"]}'
-      
-      # Connect and create publication and slot
+      # Create publication
       psql -h ${split(":", module.source_db.endpoint)[0]} \
            -U ${data.vault_generic_secret.rds.data["username"]} \
            -d cdcsourcedb \
-           -c "CREATE PUBLICATION debezium_pub FOR ALL TABLES;" \
-           -c "SELECT pg_create_logical_replication_slot('debezium', 'pgoutput');"
+           -c "CREATE PUBLICATION IF NOT EXISTS debezium_pub FOR ALL TABLES;"
       
-      unset PGPASSWORD
+      # Create replication slot only if it doesn't exist
+      psql -h ${split(":", module.source_db.endpoint)[0]} \
+           -U ${data.vault_generic_secret.rds.data["username"]} \
+           -d cdcsourcedb \
+           -c "SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = 'debezium') THEN pg_create_logical_replication_slot('debezium', 'pgoutput') END;" \
+           2>&1 || true
+      
+      rm ~/.pgpass
     EOT
   }
 }
@@ -186,29 +219,54 @@ resource "null_resource" "setup_postgres_cdc" {
 module "msk_cluster" {
   source                              = "./modules/msk"
   cluster_name                        = "cdc-cluster"
-  kafka_version                       = "4.1.1.kraft"
+  kafka_version                       = "4.1.x.kraft"
   number_of_broker_nodes              = 3
   instance_type                       = "kafka.m5.large"
-  client_subnets                      = module.vpc.public_subnets
-  security_groups                     = [aws_security_group.msk_sg.id]
+  client_subnets                      = module.vpc.private_subnets
+  security_groups                     = [module.msk_sg.id]
   ebs_volume_size                     = 100
   encryption_in_transit_client_broker = "TLS_PLAINTEXT"
   configuration_name                  = "cdc-demo-config"
-  configuration_kafka_versions        = ["4.1.1.kraft"]
-  configuration_server_properties     = <<PROPERTIES
+  configuration_kafka_versions        = ["4.1.x.kraft"]
+  configuration_server_properties = <<PROPERTIES
+# Enable dynamic topic creation for Debezium
 auto.create.topics.enable=true
 delete.topic.enable=true
+
+# Partition settings
+num.partitions=3
+default.replication.factor=3
+
+# Data retention (7 days)
 log.retention.hours=168
+log.segment.bytes=1073741824
+
+# Replication settings for durability
+min.insync.replicas=2
+offsets.topic.replication.factor=3
+transaction.state.log.replication.factor=3
+transaction.state.log.min.isr=2
+
+# Performance tuning
 num.io.threads=8
 num.network.threads=5
-num.partitions=1
 num.replica.fetchers=2
 replica.lag.time.max.ms=30000
+
+# Message size limits (important for CDC payloads)
+message.max.bytes=1048588
+replica.fetch.max.bytes=1048576
 socket.request.max.bytes=104857600
-unclean.leader.election.enable=true
-offsets.topic.replication.factor=1
-transaction.state.log.replication.factor=1
-transaction.state.log.min.isr=1
+
+# Compression for storage efficiency
+compression.type=snappy
+
+# Reliability settings
+unclean.leader.election.enable=false
+
+# Consumer group settings
+group.min.session.timeout.ms=6000
+group.max.session.timeout.ms=1800000
 PROPERTIES
 }
 
@@ -248,11 +306,11 @@ module "plugins_bucket" {
   objects = [
     {
       key    = "debezium-postgres-connector.zip"
-      source = "../connectors/debezium-postgres-connector.zip"
+      source = "../connectors/debezium-connector-postgres.zip"
     },
     {
       key    = "s3-sink.zip"
-      source = "../connectors/s3-sink.zip"
+      source = "../connectors/s3-sink-connector.zip"
     }
   ]
   versioning_enabled = "Enabled"
@@ -284,7 +342,6 @@ module "plugins_bucket" {
 resource "aws_mskconnect_custom_plugin" "debezium_postgres_plugin" {
   name         = "debezium-postgres-plugin"
   content_type = "ZIP"
-
   location {
     s3 {
       bucket_arn = module.plugins_bucket.arn
@@ -297,7 +354,6 @@ resource "aws_mskconnect_custom_plugin" "debezium_postgres_plugin" {
 resource "aws_mskconnect_custom_plugin" "s3_sink_plugin" {
   name         = "s3-sink-plugin"
   content_type = "ZIP"
-
   location {
     s3 {
       bucket_arn = module.plugins_bucket.arn
@@ -401,7 +457,7 @@ module "s3_sink_role" {
             {
                 "Action": "sts:AssumeRole",
                 "Principal": {
-                  "Service": "s3.amazonaws.com"
+                  "Service": "kafkaconnect.amazonaws.com"
                 },
                 "Effect": "Allow",
                 "Sid": ""
@@ -476,37 +532,103 @@ module "s3_sink_role" {
 # -----------------------------------------------------------------------------------------
 # MSK Connectors
 # -----------------------------------------------------------------------------------------
+module "debezium_connector_log_group" {
+  source            = "./modules/cloudwatch/cloudwatch-log-group"
+  log_group_name    = "/aws/mskconnect/debezium-postgres-connector"
+  retention_in_days = 90
+}
+
+module "s3_sink_connector_log_group" {
+  source            = "./modules/cloudwatch/cloudwatch-log-group"
+  log_group_name    = "/aws/mskconnect/s3-sink-connector"
+  retention_in_days = 90
+}
+
 module "debezium_postgres_connector" {
-  source = "./modules/msk_connector"
+  source               = "./modules/msk_connector"
   name                 = "debezium-postgres-connector"
   kafkaconnect_version = "2.7.1"
   connector_configuration = {
+    # Core connector settings
     "connector.class"      = "io.debezium.connector.postgresql.PostgresConnector"
     "database.hostname"    = split(":", module.source_db.endpoint)[0]
     "database.port"        = "5432"
     "database.dbname"      = "cdcsourcedb"
     "database.server.name" = "postgres-cdc"
-    "plugin.name"          = "pgoutput"
-    "slot.name"            = "debezium"
-    "publication.name"     = "debezium_pub"
-    "database.user"        = tostring(data.vault_generic_secret.rds.data["username"])
-    "database.password"    = tostring(data.vault_generic_secret.rds.data["password"])
-    "tasks.max"            = "1"
+    
+    # Postgres-specific settings
+    "plugin.name"                    = "pgoutput"
+    "slot.name"                      = "debezium"
+    "publication.name"               = "debezium_pub"
+    "publication.autocreate.mode"    = "filtered"
+    "slot.drop.on.stop"              = "false"
+    
+    # Authentication
+    "database.user"     = tostring(data.vault_generic_secret.rds.data["username"])
+    "database.password" = tostring(data.vault_generic_secret.rds.data["password"])
+    
+    # Task configuration
+    "tasks.max" = "1"
+    
+    # Topic configuration
+    "topic.prefix"       = "postgres-cdc"
+    "table.include.list" = "public.*"
+    
+    # Schema history (required for Debezium)
+    "schema.history.internal.kafka.bootstrap.servers"       = module.msk_cluster.bootstrap_brokers_tls
+    "schema.history.internal.kafka.topic"                   = "schema-changes.postgres"
+    "schema.history.internal.kafka.recovery.poll.interval.ms" = "1000"
+    "schema.history.internal.kafka.recovery.attempts"       = "100"
+    "schema.history.internal.consumer.security.protocol"    = "PLAINTEXT"
+    "schema.history.internal.producer.security.protocol"    = "PLAINTEXT"
+    
+    # Heartbeat to prevent slot timeout
+    "heartbeat.interval.ms"   = "10000"
+    "heartbeat.action.query"  = "INSERT INTO heartbeat (status) VALUES (1) ON CONFLICT DO NOTHING"
+    
+    # Snapshot configuration
+    "snapshot.mode"           = "initial"
+    "snapshot.locking.mode"   = "none"
+    
+    # Error handling
+    "errors.tolerance"            = "all"
+    "errors.log.enable"           = "true"
+    "errors.log.include.messages" = "true"
+    
+    # Converters
+    "key.converter"                  = "org.apache.kafka.connect.json.JsonConverter"
+    "key.converter.schemas.enable"   = "false"
+    "value.converter"                = "org.apache.kafka.connect.json.JsonConverter"
+    "value.converter.schemas.enable" = "false"
+    
+    # Performance tuning
+    "max.batch.size"       = "2048"
+    "max.queue.size"       = "8192"
+    "poll.interval.ms"     = "1000"
   }
-  bootstrap_servers = module.msk_cluster.bootstrap_brokers_tls
-  security_groups = [
-    aws_security_group.msk_sg.id
-  ]
+  
+  enable_log_delivery = true
+  log_delivery = {
+    cloudwatch_logs = {
+      enabled   = true
+      log_group = module.debezium_connector_log_group.name
+    }
+  }
+  
+  bootstrap_servers = module.msk_cluster.bootstrap_brokers
+  security_groups   = [module.msk_sg.id]
   subnets = [
-    module.vpc.public_subnets[0],
-    module.vpc.public_subnets[1],
-    module.vpc.public_subnets[2]
+    module.vpc.private_subnets[0],
+    module.vpc.private_subnets[1],
+    module.vpc.private_subnets[2]
   ]
-  authentication_type = "NONE"
-  encryption_type     = "TLS"
-  plugin_arn      = aws_mskconnect_custom_plugin.debezium_postgres_plugin.arn
-  plugin_revision = aws_mskconnect_custom_plugin.debezium_postgres_plugin.latest_revision
+  
+  authentication_type        = "NONE"
+  encryption_type            = "PLAINTEXT"
+  plugin_arn                 = aws_mskconnect_custom_plugin.debezium_postgres_plugin.arn
+  plugin_revision            = aws_mskconnect_custom_plugin.debezium_postgres_plugin.latest_revision
   service_execution_role_arn = module.debezium_connector_role.arn
+  
   use_autoscaling = true
   autoscaling = {
     worker_count     = 1
@@ -515,102 +637,80 @@ module "debezium_postgres_connector" {
     scale_in_cpu     = 20
     scale_out_cpu    = 80
   }
-  depends_on = [module.msk_cluster]
+  
+  depends_on = [
+    module.msk_cluster,
+    null_resource.setup_postgres_cdc
+  ]
 }
-
-# resource "aws_mskconnect_connector" "debezium_postgres_connector" {
-#   name = "debezium-postgres-connector"
-
-#   kafkaconnect_version = "2.7.1"
-
-#   capacity {
-#     autoscaling {
-#       mcu_count        = 1
-#       min_worker_count = 1
-#       max_worker_count = 2
-
-#       scale_in_policy {
-#         cpu_utilization_percentage = 20
-#       }
-
-#       scale_out_policy {
-#         cpu_utilization_percentage = 80
-#       }
-#     }
-#   }
-
-#   connector_configuration = {
-#     "connector.class"      = "io.debezium.connector.postgresql.PostgresConnector"
-#     "database.hostname"    = "${split(":", module.source_db.endpoint)[0]}"
-#     "database.port"        = 5432
-#     "database.dbname"      = "cdcsourcedb"
-#     "database.server.name" = "postgres-cdc"
-#     "plugin.name"          = "pgoutput"
-#     "slot.name"            = "debezium"
-#     "publication.name"     = "debezium_pub"
-#     "database.user"        = tostring(data.vault_generic_secret.rds.data["username"])
-#     "database.password"    = tostring(data.vault_generic_secret.rds.data["password"])
-#     "tasks.max"            = "1"
-#   }
-
-#   kafka_cluster {
-#     apache_kafka_cluster {
-#       bootstrap_servers = module.msk_cluster.bootstrap_brokers_tls
-
-#       vpc {
-#         security_groups = [aws_security_group.msk_sg.id]
-#         subnets = [
-#           module.vpc.public_subnets[0],
-#           module.vpc.public_subnets[1],
-#           module.vpc.public_subnets[2]
-#         ]
-#       }
-#     }
-#   }
-
-#   kafka_cluster_client_authentication {
-#     authentication_type = "NONE"
-#   }
-
-#   kafka_cluster_encryption_in_transit {
-#     encryption_type = "TLS"
-#   }
-
-#   plugin {
-#     custom_plugin {
-#       arn      = aws_mskconnect_custom_plugin.debezium_postgres_plugin.arn
-#       revision = aws_mskconnect_custom_plugin.debezium_postgres_plugin.latest_revision
-#     }
-#   }
-
-#   service_execution_role_arn = module.debezium_connector_role.arn
-
-#   depends_on = [module.msk_cluster]
-# }
 
 module "s3_sink_connector" {
   source               = "./modules/msk_connector"
   name                 = "s3-sink-connector"
   kafkaconnect_version = "2.7.1"
   connector_configuration = {
-    "connector.class"    = "io.confluent.connect.s3.S3SinkConnector"
-    "topics.regex"       = "postgres-cdc.*"
-    "s3.region"          = var.aws_region
-    "s3.bucket.name"     = module.destination_bucket.bucket
-    "format.class"       = "io.confluent.connect.s3.format.json.JsonFormat"
-    "tasks.max"          = "1"
+    # Core connector settings
+    "connector.class" = "io.confluent.connect.s3.S3SinkConnector"
+    "topics.regex"    = "postgres-cdc\\..*"  # Escaped dot for proper regex
+    "tasks.max"       = "2"
+    
+    # S3 configuration
+    "s3.region"      = var.aws_region
+    "s3.bucket.name" = module.destination_bucket.bucket
+    "s3.part.size"   = "5242880"
+    
+    # Format settings
+    "format.class"  = "io.confluent.connect.s3.format.json.JsonFormat"
+    "storage.class" = "io.confluent.connect.s3.storage.S3Storage"
+    
+    # Partitioning
+    "partitioner.class"     = "io.confluent.connect.storage.partitioner.TimeBasedPartitioner"
+    "path.format"           = "'year'=YYYY/'month'=MM/'day'=dd/'hour'=HH"
+    "partition.duration.ms" = "3600000"
+    "timezone"              = "UTC"
+    "timestamp.extractor"   = "Record"
+    "locale"                = "en-US"
+    
+    # Flush settings
     "flush.size"         = "1000"
     "rotate.interval.ms" = "60000"
-    "storage.class"      = "io.confluent.connect.s3.storage.S3Storage"
+    
+    # Schema settings
+    "schema.compatibility" = "NONE"
+    
+    # Error handling
+    "errors.tolerance"                  = "all"
+    "errors.log.enable"                 = "true"
+    "errors.log.include.messages"       = "true"
+    "errors.deadletterqueue.topic.name" = "dlq-s3-sink"
+    
+    # Converters (must match Debezium output)
+    "key.converter"                  = "org.apache.kafka.connect.json.JsonConverter"
+    "key.converter.schemas.enable"   = "false"
+    "value.converter"                = "org.apache.kafka.connect.json.JsonConverter"
+    "value.converter.schemas.enable" = "false"
+    
+    # Behavior settings
+    "behavior.on.null.values" = "ignore"
   }
-  bootstrap_servers = module.msk_cluster.bootstrap_brokers_tls
-  security_groups   = [aws_security_group.msk_sg.id]
-  subnets           = module.vpc.public_subnets
-  authentication_type = "NONE"
-  encryption_type     = "TLS"
-  plugin_arn      = aws_mskconnect_custom_plugin.s3_sink_plugin.arn
-  plugin_revision = aws_mskconnect_custom_plugin.s3_sink_plugin.latest_revision
+  
+  enable_log_delivery = true
+  log_delivery = {
+    cloudwatch_logs = {
+      enabled   = true
+      log_group = module.s3_sink_connector_log_group.name
+    }
+  }
+  
+  bootstrap_servers          = module.msk_cluster.bootstrap_brokers
+  security_groups            = [module.msk_sg.id]
+  subnets                    = module.vpc.private_subnets
+  authentication_type        = "NONE"
+  encryption_type            = "PLAINTEXT"
+  plugin_arn                 = aws_mskconnect_custom_plugin.s3_sink_plugin.arn
+  plugin_revision            = aws_mskconnect_custom_plugin.s3_sink_plugin.latest_revision
   service_execution_role_arn = module.s3_sink_role.arn
+  
   use_autoscaling = true
   autoscaling = {
     worker_count     = 1
@@ -619,63 +719,9 @@ module "s3_sink_connector" {
     scale_in_cpu     = 20
     scale_out_cpu    = 80
   }
-  depends_on = [module.msk_cluster]
+  
+  depends_on = [
+    module.msk_cluster,
+    module.debezium_postgres_connector
+  ]
 }
-
-# resource "aws_mskconnect_connector" "s3_sink_connector" {
-#   name = "s3-sink-connector"
-
-#   kafkaconnect_version = "2.7.1"
-
-#   capacity {
-#     autoscaling {
-#       mcu_count        = 1
-#       min_worker_count = 1
-#       max_worker_count = 2
-#       scale_in_policy {
-#         cpu_utilization_percentage = 20
-#       }
-#       scale_out_policy {
-#         cpu_utilization_percentage = 80
-#       }
-#     }
-#   }
-#   connector_configuration = {
-#     "connector.class"    = "io.confluent.connect.s3.S3SinkConnector"
-#     "topics.regex"       = "postgres-cdc.*"
-#     "s3.region"          = var.aws_region
-#     "s3.bucket.name"     = "${module.destination_bucket.bucket}"
-#     "format.class"       = "io.confluent.connect.s3.format.json.JsonFormat"
-#     "tasks.max"          = "1"
-#     "flush.size"         = "1000"
-#     "rotate.interval.ms" = "60000"
-#     "storage.class"      = "io.confluent.connect.s3.storage.S3Storage"
-#   }
-#   kafka_cluster {
-#     apache_kafka_cluster {
-#       bootstrap_servers = module.msk_cluster.bootstrap_brokers_tls
-#       vpc {
-#         security_groups = [aws_security_group.msk_sg.id]
-#         subnets = [
-#           module.vpc.public_subnets[0],
-#           module.vpc.public_subnets[1],
-#           module.vpc.public_subnets[2]
-#         ]
-#       }
-#     }
-#   }
-#   kafka_cluster_client_authentication {
-#     authentication_type = "NONE"
-#   }
-#   kafka_cluster_encryption_in_transit {
-#     encryption_type = "TLS"
-#   }
-#   plugin {
-#     custom_plugin {
-#       arn      = aws_mskconnect_custom_plugin.s3_sink_plugin.arn
-#       revision = aws_mskconnect_custom_plugin.s3_sink_plugin.latest_revision
-#     }
-#   }
-#   service_execution_role_arn = module.s3_sink_role.arn
-#   depends_on                 = [module.msk_cluster]
-# }

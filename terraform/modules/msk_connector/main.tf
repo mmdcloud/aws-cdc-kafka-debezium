@@ -1,4 +1,4 @@
-resource "aws_mskconnect_connector" "this" {
+resource "aws_mskconnect_connector" "connector" {
   name                       = var.name
   kafkaconnect_version       = var.kafkaconnect_version
   service_execution_role_arn = var.service_execution_role_arn
@@ -6,7 +6,7 @@ resource "aws_mskconnect_connector" "this" {
     for_each = var.use_autoscaling ? [1] : [0]
     content {
       autoscaling {
-        mcu_count        = var.autoscaling.mcu_count
+        mcu_count        = var.autoscaling.worker_count
         min_worker_count = var.autoscaling.min_worker_count
         max_worker_count = var.autoscaling.max_worker_count
         scale_in_policy {
@@ -27,6 +27,17 @@ resource "aws_mskconnect_connector" "this" {
       }
     }
   }
+  dynamic "log_delivery" {
+    for_each = var.enable_log_delivery ? [1] : []
+    content {
+      worker_log_delivery {
+        cloudwatch_logs {
+          enabled         = var.log_delivery.cloudwatch_logs.enabled
+          log_group       = var.log_delivery.cloudwatch_logs.log_group
+        }
+      }
+    }
+  }  
   connector_configuration = var.connector_configuration
   kafka_cluster {
     apache_kafka_cluster {
@@ -49,5 +60,4 @@ resource "aws_mskconnect_connector" "this" {
       revision = var.plugin_revision
     }
   }
-  depends_on = var.depends_on
 }

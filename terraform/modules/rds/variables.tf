@@ -13,6 +13,7 @@ variable "parameters" {
   type = list(object({
     name  = string
     value = string
+    apply_method = string
   }))
 }
 variable "skip_final_snapshot" {}
