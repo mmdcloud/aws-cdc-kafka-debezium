@@ -725,3 +725,406 @@ module "s3_sink_connector" {
     module.debezium_postgres_connector
   ]
 }
+
+# -----------------------------------------------------------------------------------------
+# SNS Topic for Alarm Notifications
+# -----------------------------------------------------------------------------------------
+module "cdc_alarm_notifications" {
+  source     = "./modules/sns"
+  topic_name = "cdc-alarm-notifications"
+  subscriptions = [
+    {
+      protocol = "email"
+      endpoint = var.notification_email
+    }
+  ]
+}
+
+# -----------------------------------------------------------------------------------------
+# RDS CloudWatch Alarms
+# -----------------------------------------------------------------------------------------
+
+# RDS CPU Utilization
+module "rds_cpu_alarm" {
+  source              = "./modules/cloudwatch/cloudwatch-alarm"
+  alarm_name          = "rds-high-cpu-utilization"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "2"
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/RDS"
+  period              = "300"
+  statistic           = "Average"
+  threshold           = "80"
+  alarm_description   = "RDS CPU utilization is above 80%"
+  alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
+  ok_actions          = [module.cdc_alarm_notifications.topic_arn]
+
+  dimensions = {
+    DBInstanceIdentifier = module.source_db.db_instance_id
+  }
+}
+
+# RDS Freeable Memory
+module "rds_memory_alarm" {
+  source              = "./modules/cloudwatch/cloudwatch-alarm"
+  alarm_name          = "rds-low-freeable-memory"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = "2"
+  metric_name         = "FreeableMemory"
+  namespace           = "AWS/RDS"
+  period              = "300"
+  statistic           = "Average"
+  threshold           = "1073741824"  # 1 GB in bytes
+  alarm_description   = "RDS freeable memory is below 1 GB"
+  alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
+  ok_actions          = [module.cdc_alarm_notifications.topic_arn]
+
+  dimensions = {
+    DBInstanceIdentifier = module.source_db.db_instance_id
+  }
+}
+
+# RDS Database Connections
+module "rds_connections_alarm" {
+  source              = "./modules/cloudwatch/cloudwatch-alarm"
+  alarm_name          = "rds-high-database-connections"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "2"
+  metric_name         = "DatabaseConnections"
+  namespace           = "AWS/RDS"
+  period              = "300"
+  statistic           = "Average"
+  threshold           = "80"
+  alarm_description   = "RDS database connections are high"
+  alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
+  ok_actions          = [module.cdc_alarm_notifications.topic_arn]
+
+  dimensions = {
+    DBInstanceIdentifier = module.source_db.db_instance_id
+  }
+}
+
+# RDS Replication Slot Lag (Critical for CDC)
+module "rds_replication_lag_alarm" {
+  source              = "./modules/cloudwatch/cloudwatch-alarm"
+  alarm_name          = "rds-replication-slot-lag"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "3"
+  metric_name         = "OldestReplicationSlotLag"
+  namespace           = "AWS/RDS"
+  period              = "60"
+  statistic           = "Maximum"
+  threshold           = "1000"  # 1000 MB
+  alarm_description   = "RDS replication slot lag is high - CDC may be falling behind"
+  alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
+  ok_actions          = [module.cdc_alarm_notifications.topic_arn]
+
+  dimensions = {
+    DBInstanceIdentifier = module.source_db.db_instance_id
+  }
+}
+
+# RDS Disk Queue Depth
+module "rds_disk_queue_alarm" {
+  source              = "./modules/cloudwatch/cloudwatch-alarm"
+  alarm_name          = "rds-high-disk-queue-depth"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "2"
+  metric_name         = "DiskQueueDepth"
+  namespace           = "AWS/RDS"
+  period              = "300"
+  statistic           = "Average"
+  threshold           = "10"
+  alarm_description   = "RDS disk queue depth is high"
+  alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
+  ok_actions          = [module.cdc_alarm_notifications.topic_arn]
+
+  dimensions = {
+    DBInstanceIdentifier = module.source_db.db_instance_id
+  }
+}
+
+# RDS Free Storage Space
+module "rds_storage_alarm" {
+  source              = "./modules/cloudwatch/cloudwatch-alarm"
+  alarm_name          = "rds-low-storage-space"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = "1"
+  metric_name         = "FreeStorageSpace"
+  namespace           = "AWS/RDS"
+  period              = "300"
+  statistic           = "Average"
+  threshold           = "10737418240"  # 10 GB in bytes
+  alarm_description   = "RDS free storage space is below 10 GB"
+  alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
+  ok_actions          = [module.cdc_alarm_notifications.topic_arn]
+
+  dimensions = {
+    DBInstanceIdentifier = module.source_db.db_instance_id
+  }
+}
+
+# MSK CPU Utilization
+module "msk_cpu_alarm" {
+  source              = "./modules/cloudwatch/cloudwatch-alarm"
+  alarm_name          = "msk-high-cpu-utilization"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "2"
+  metric_name         = "CpuUser"
+  namespace           = "AWS/Kafka"
+  period              = "300"
+  statistic           = "Average"
+  threshold           = "80"
+  alarm_description   = "MSK CPU utilization is above 80%"
+  alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
+  ok_actions          = [module.cdc_alarm_notifications.topic_arn]
+
+  dimensions = {
+    "Cluster Name" = module.msk_cluster.cluster_name
+  }
+}
+
+# MSK Disk Space Usage
+module "msk_disk_alarm" {
+  source              = "./modules/cloudwatch/cloudwatch-alarm"
+  alarm_name          = "msk-high-disk-usage"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "2"
+  metric_name         = "KafkaDataLogsDiskUsed"
+  namespace           = "AWS/Kafka"
+  period              = "300"
+  statistic           = "Average"
+  threshold           = "80"  # 80% disk usage
+  alarm_description   = "MSK disk usage is above 80%"
+  alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
+  ok_actions          = [module.cdc_alarm_notifications.topic_arn]
+
+  dimensions = {
+    "Cluster Name" = module.msk_cluster.cluster_name
+  }
+}
+
+# MSK Under Replicated Partitions
+module "msk_under_replicated_alarm" {
+  source              = "./modules/cloudwatch/cloudwatch-alarm"
+  alarm_name          = "msk-under-replicated-partitions"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "2"
+  metric_name         = "UnderReplicatedPartitions"
+  namespace           = "AWS/Kafka"
+  period              = "300"
+  statistic           = "Maximum"
+  threshold           = "0"
+  alarm_description   = "MSK has under-replicated partitions - data durability at risk"
+  alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
+  ok_actions          = [module.cdc_alarm_notifications.topic_arn]
+
+  dimensions = {
+    "Cluster Name" = module.msk_cluster.cluster_name
+  }
+}
+
+# MSK Offline Partitions
+module "msk_offline_partitions_alarm" {
+  source              = "./modules/cloudwatch/cloudwatch-alarm"
+  alarm_name          = "msk-offline-partitions"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "1"
+  metric_name         = "OfflinePartitionsCount"
+  namespace           = "AWS/Kafka"
+  period              = "60"
+  statistic           = "Maximum"
+  threshold           = "0"
+  alarm_description   = "MSK has offline partitions - CRITICAL"
+  alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
+  ok_actions          = [module.cdc_alarm_notifications.topic_arn]
+
+  dimensions = {
+    "Cluster Name" = module.msk_cluster.cluster_name
+  }
+}
+
+# MSK Active Controller Count
+module "msk_active_controller_alarm" {
+  source              = "./modules/cloudwatch/cloudwatch-alarm"
+  alarm_name          = "msk-no-active-controller"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = "2"
+  metric_name         = "ActiveControllerCount"
+  namespace           = "AWS/Kafka"
+  period              = "60"
+  statistic           = "Maximum"
+  threshold           = "1"
+  alarm_description   = "MSK has no active controller - cluster issues"
+  alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
+  ok_actions          = [module.cdc_alarm_notifications.topic_arn]
+
+  dimensions = {
+    "Cluster Name" = module.msk_cluster.cluster_name
+  }
+}
+
+# MSK Network Throughput (Incoming)
+module "msk_network_in_alarm" {
+  source              = "./modules/cloudwatch/cloudwatch-alarm"
+  alarm_name          = "msk-high-network-incoming"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "2"
+  metric_name         = "BytesInPerSec"
+  namespace           = "AWS/Kafka"
+  period              = "300"
+  statistic           = "Average"
+  threshold           = "100000000"  # 100 MB/s
+  alarm_description   = "MSK incoming network throughput is high"
+  alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
+  ok_actions          = [module.cdc_alarm_notifications.topic_arn]
+
+  dimensions = {
+    "Cluster Name" = module.msk_cluster.cluster_name
+  }
+}
+
+# MSK Consumer Lag (Critical for CDC pipeline)
+module "msk_consumer_lag_alarm" {
+  source              = "./modules/cloudwatch/cloudwatch-alarm"
+  alarm_name          = "msk-high-consumer-lag"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "3"
+  metric_name         = "EstimatedMaxTimeLag"
+  namespace           = "AWS/Kafka"
+  period              = "300"
+  statistic           = "Maximum"
+  threshold           = "300000"  # 5 minutes in milliseconds
+  alarm_description   = "MSK consumer lag is above 5 minutes"
+  alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
+  ok_actions          = [module.cdc_alarm_notifications.topic_arn]
+
+  dimensions = {
+    "Cluster Name"  = module.msk_cluster.cluster_name
+    "Consumer Group" = "connect-s3-sink-connector"  # Adjust based on your consumer group
+  }
+}
+
+# Debezium Connector Failed Tasks
+module "debezium_failed_tasks_alarm" {
+  source              = "./modules/cloudwatch/cloudwatch-alarm"
+  alarm_name          = "debezium-connector-failed-tasks"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "1"
+  metric_name         = "task-count"
+  namespace           = "AWS/KafkaConnect"
+  period              = "60"
+  statistic           = "Maximum"
+  threshold           = "0"
+  alarm_description   = "Debezium connector has failed tasks - CDC may be stopped"
+  alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
+  ok_actions          = [module.cdc_alarm_notifications.topic_arn]
+
+  dimensions = {
+    "connector-name" = module.debezium_postgres_connector.connector_name
+    "task-state"     = "failed"
+  }
+}
+
+# Debezium Connector Running Tasks
+module "debezium_running_tasks_alarm" {
+  source              = "./modules/cloudwatch/cloudwatch-alarm"
+  alarm_name          = "debezium-connector-no-running-tasks"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = "2"
+  metric_name         = "task-count"
+  namespace           = "AWS/KafkaConnect"
+  period              = "300"
+  statistic           = "Minimum"
+  threshold           = "1"
+  alarm_description   = "Debezium connector has no running tasks"
+  alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
+  ok_actions          = [module.cdc_alarm_notifications.topic_arn]
+
+  dimensions = {
+    "connector-name" = module.debezium_postgres_connector.connector_name
+    "task-state"     = "running"
+  }
+}
+
+# -----------------------------------------------------------------------------------------
+# MSK Connect (S3 Sink Connector) CloudWatch Alarms
+# -----------------------------------------------------------------------------------------
+
+# S3 Sink Connector Failed Tasks
+module "s3_sink_failed_tasks_alarm" {
+  source              = "./modules/cloudwatch/cloudwatch-alarm"
+  alarm_name          = "s3-sink-connector-failed-tasks"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "1"
+  metric_name         = "task-count"
+  namespace           = "AWS/KafkaConnect"
+  period              = "60"
+  statistic           = "Maximum"
+  threshold           = "0"
+  alarm_description   = "S3 Sink connector has failed tasks - data may not be written to S3"
+  alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
+  ok_actions          = [module.cdc_alarm_notifications.topic_arn]
+
+  dimensions = {
+    "connector-name" = module.s3_sink_connector.connector_name
+    "task-state"     = "failed"
+  }
+}
+
+# S3 Sink Connector Running Tasks
+module "s3_sink_running_tasks_alarm" {
+  source              = "./modules/cloudwatch/cloudwatch-alarm"
+  alarm_name          = "s3-sink-connector-no-running-tasks"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = "2"
+  metric_name         = "task-count"
+  namespace           = "AWS/KafkaConnect"
+  period              = "300"
+  statistic           = "Minimum"
+  threshold           = "1"
+  alarm_description   = "S3 Sink connector has no running tasks"
+  alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
+  ok_actions          = [module.cdc_alarm_notifications.topic_arn]
+
+  dimensions = {
+    "connector-name" = module.s3_sink_connector.connector_name
+    "task-state"     = "running"
+  }
+}
+
+module "debezium_error_alarm" {
+  source              = "./modules/cloudwatch/cloudwatch-alarm"
+  alarm_name          = "debezium-connector-errors"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "1"
+  metric_name         = "DebeziumErrorCount"
+  namespace           = "CDC/Connectors"
+  period              = "300"
+  statistic           = "Sum"
+  threshold           = "5"
+  alarm_description   = "Debezium connector has errors in logs"
+  alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
+  ok_actions          = [module.cdc_alarm_notifications.topic_arn]
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {}
+}
+
+module "s3_sink_error_alarm" {
+  source              = "./modules/cloudwatch/cloudwatch-alarm"
+  alarm_name          = "s3-sink-connector-errors"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "1"
+  metric_name         = "S3SinkErrorCount"
+  namespace           = "CDC/Connectors"
+  period              = "300"
+  statistic           = "Sum"
+  threshold           = "5"
+  alarm_description   = "S3 Sink connector has errors in logs"
+  alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
+  ok_actions          = [module.cdc_alarm_notifications.topic_arn]
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {}
+}

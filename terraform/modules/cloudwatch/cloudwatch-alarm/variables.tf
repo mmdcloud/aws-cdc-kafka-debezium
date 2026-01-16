@@ -15,3 +15,6 @@ variable "ok_actions"{}
 variable "extended_statistic" {
     default = ""
 }
+variable "treat_missing_data" {
+    default = ""
+}

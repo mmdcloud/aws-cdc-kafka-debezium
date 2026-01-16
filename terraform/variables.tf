@@ -23,3 +23,8 @@ variable "azs" {
   type        = list(string)
   description = "Availability Zones"
 }
+
+variable "notification_email" {
+  type        = string
+  description = "SNS Notification Email"
+}
