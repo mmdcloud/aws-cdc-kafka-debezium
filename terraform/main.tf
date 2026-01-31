@@ -42,12 +42,12 @@ module "rds_sg" {
   vpc_id = module.vpc.vpc_id
   ingress_rules = [
     {
-      description     = "PostgreSQL Traffic from MSK Connectors"
+      description     = "PostgreSQL Traffic from Private Subnets"
       from_port       = 5432
       to_port         = 5432
       protocol        = "tcp"
-      security_groups = [module.msk_sg.id]
-      cidr_blocks     = []
+      cidr_blocks     = concat(var.database_subnets, var.private_subnets)
+      security_groups = []
     }
   ]
   egress_rules = [
@@ -76,6 +76,7 @@ module "msk_sg" {
       to_port         = 9098
       protocol        = "tcp"
       security_groups = []
+      self            = true
       cidr_blocks     = ["0.0.0.0/0"]
     }
   ]
@@ -91,6 +92,16 @@ module "msk_sg" {
   tags = {
     Name = "msk-sg"
   }
+}
+
+resource "aws_security_group_rule" "rds_from_msk_connectors" {
+  type                     = "ingress"
+  from_port                = 5432
+  to_port                  = 5432
+  protocol                 = "tcp"
+  source_security_group_id = module.msk_sg.id
+  security_group_id        = module.rds_sg.id
+  description              = "Allow MSK Connectors to access RDS"
 }
 
 # -----------------------------------------------------------------------------------------
@@ -165,7 +176,7 @@ module "source_db" {
       value        = "4"
       apply_method = "pending-reboot"
     }
-    
+
     # # DYNAMIC PARAMETERS - No reboot required
     # {
     #   name         = "wal_sender_timeout"
@@ -200,6 +211,11 @@ EOF
            -U ${data.vault_generic_secret.rds.data["username"]} \
            -d cdcsourcedb \
            -c "CREATE PUBLICATION IF NOT EXISTS debezium_pub FOR ALL TABLES;"
+
+      psql -h ${split(":", module.source_db.endpoint)[0]} \
+     -U ${data.vault_generic_secret.rds.data["username"]} \
+     -d cdcsourcedb \
+     -c "CREATE TABLE IF NOT EXISTS heartbeat (status INT PRIMARY KEY);"
       
       # Create replication slot only if it doesn't exist
       psql -h ${split(":", module.source_db.endpoint)[0]} \
@@ -228,7 +244,7 @@ module "msk_cluster" {
   encryption_in_transit_client_broker = "TLS_PLAINTEXT"
   configuration_name                  = "cdc-demo-config"
   configuration_kafka_versions        = ["4.1.x.kraft"]
-  configuration_server_properties = <<PROPERTIES
+  configuration_server_properties     = <<PROPERTIES
 # Enable dynamic topic creation for Debezium
 auto.create.topics.enable=true
 delete.topic.enable=true
@@ -555,58 +571,58 @@ module "debezium_postgres_connector" {
     "database.port"        = "5432"
     "database.dbname"      = "cdcsourcedb"
     "database.server.name" = "postgres-cdc"
-    
+
     # Postgres-specific settings
-    "plugin.name"                    = "pgoutput"
-    "slot.name"                      = "debezium"
-    "publication.name"               = "debezium_pub"
-    "publication.autocreate.mode"    = "filtered"
-    "slot.drop.on.stop"              = "false"
-    
+    "plugin.name"                 = "pgoutput"
+    "slot.name"                   = "debezium"
+    "publication.name"            = "debezium_pub"
+    "publication.autocreate.mode" = "filtered"
+    "slot.drop.on.stop"           = "false"
+
     # Authentication
     "database.user"     = tostring(data.vault_generic_secret.rds.data["username"])
     "database.password" = tostring(data.vault_generic_secret.rds.data["password"])
-    
+
     # Task configuration
     "tasks.max" = "1"
-    
+
     # Topic configuration
     "topic.prefix"       = "postgres-cdc"
     "table.include.list" = "public.*"
-    
+
     # Schema history (required for Debezium)
-    "schema.history.internal.kafka.bootstrap.servers"       = module.msk_cluster.bootstrap_brokers_tls
-    "schema.history.internal.kafka.topic"                   = "schema-changes.postgres"
+    "schema.history.internal.kafka.bootstrap.servers"         = module.msk_cluster.bootstrap_brokers
+    "schema.history.internal.kafka.topic"                     = "schema-changes.postgres"
     "schema.history.internal.kafka.recovery.poll.interval.ms" = "1000"
-    "schema.history.internal.kafka.recovery.attempts"       = "100"
-    "schema.history.internal.consumer.security.protocol"    = "PLAINTEXT"
-    "schema.history.internal.producer.security.protocol"    = "PLAINTEXT"
-    
+    "schema.history.internal.kafka.recovery.attempts"         = "100"
+    "schema.history.internal.consumer.security.protocol"      = "PLAINTEXT"
+    "schema.history.internal.producer.security.protocol"      = "PLAINTEXT"
+
     # Heartbeat to prevent slot timeout
-    "heartbeat.interval.ms"   = "10000"
-    "heartbeat.action.query"  = "INSERT INTO heartbeat (status) VALUES (1) ON CONFLICT DO NOTHING"
-    
+    "heartbeat.interval.ms"  = "10000"
+    "heartbeat.action.query" = "INSERT INTO heartbeat (status) VALUES (1) ON CONFLICT DO NOTHING"
+
     # Snapshot configuration
-    "snapshot.mode"           = "initial"
-    "snapshot.locking.mode"   = "none"
-    
+    "snapshot.mode"         = "initial"
+    "snapshot.locking.mode" = "none"
+
     # Error handling
     "errors.tolerance"            = "all"
     "errors.log.enable"           = "true"
     "errors.log.include.messages" = "true"
-    
+
     # Converters
     "key.converter"                  = "org.apache.kafka.connect.json.JsonConverter"
     "key.converter.schemas.enable"   = "false"
     "value.converter"                = "org.apache.kafka.connect.json.JsonConverter"
     "value.converter.schemas.enable" = "false"
-    
+
     # Performance tuning
-    "max.batch.size"       = "2048"
-    "max.queue.size"       = "8192"
-    "poll.interval.ms"     = "1000"
+    "max.batch.size"   = "2048"
+    "max.queue.size"   = "8192"
+    "poll.interval.ms" = "1000"
   }
-  
+
   enable_log_delivery = true
   log_delivery = {
     cloudwatch_logs = {
@@ -614,7 +630,7 @@ module "debezium_postgres_connector" {
       log_group = module.debezium_connector_log_group.name
     }
   }
-  
+
   bootstrap_servers = module.msk_cluster.bootstrap_brokers
   security_groups   = [module.msk_sg.id]
   subnets = [
@@ -622,13 +638,13 @@ module "debezium_postgres_connector" {
     module.vpc.private_subnets[1],
     module.vpc.private_subnets[2]
   ]
-  
+
   authentication_type        = "NONE"
   encryption_type            = "PLAINTEXT"
   plugin_arn                 = aws_mskconnect_custom_plugin.debezium_postgres_plugin.arn
   plugin_revision            = aws_mskconnect_custom_plugin.debezium_postgres_plugin.latest_revision
   service_execution_role_arn = module.debezium_connector_role.arn
-  
+
   use_autoscaling = true
   autoscaling = {
     worker_count     = 1
@@ -637,7 +653,7 @@ module "debezium_postgres_connector" {
     scale_in_cpu     = 20
     scale_out_cpu    = 80
   }
-  
+
   depends_on = [
     module.msk_cluster,
     null_resource.setup_postgres_cdc
@@ -651,18 +667,18 @@ module "s3_sink_connector" {
   connector_configuration = {
     # Core connector settings
     "connector.class" = "io.confluent.connect.s3.S3SinkConnector"
-    "topics.regex"    = "postgres-cdc\\..*"  # Escaped dot for proper regex
+    "topics.regex"    = "postgres-cdc\\..*" # Escaped dot for proper regex
     "tasks.max"       = "2"
-    
+
     # S3 configuration
     "s3.region"      = var.aws_region
     "s3.bucket.name" = module.destination_bucket.bucket
     "s3.part.size"   = "5242880"
-    
+
     # Format settings
     "format.class"  = "io.confluent.connect.s3.format.json.JsonFormat"
     "storage.class" = "io.confluent.connect.s3.storage.S3Storage"
-    
+
     # Partitioning
     "partitioner.class"     = "io.confluent.connect.storage.partitioner.TimeBasedPartitioner"
     "path.format"           = "'year'=YYYY/'month'=MM/'day'=dd/'hour'=HH"
@@ -670,30 +686,30 @@ module "s3_sink_connector" {
     "timezone"              = "UTC"
     "timestamp.extractor"   = "Record"
     "locale"                = "en-US"
-    
+
     # Flush settings
     "flush.size"         = "1000"
     "rotate.interval.ms" = "60000"
-    
+
     # Schema settings
     "schema.compatibility" = "NONE"
-    
+
     # Error handling
     "errors.tolerance"                  = "all"
     "errors.log.enable"                 = "true"
     "errors.log.include.messages"       = "true"
     "errors.deadletterqueue.topic.name" = "dlq-s3-sink"
-    
+
     # Converters (must match Debezium output)
     "key.converter"                  = "org.apache.kafka.connect.json.JsonConverter"
     "key.converter.schemas.enable"   = "false"
     "value.converter"                = "org.apache.kafka.connect.json.JsonConverter"
     "value.converter.schemas.enable" = "false"
-    
+
     # Behavior settings
     "behavior.on.null.values" = "ignore"
   }
-  
+
   enable_log_delivery = true
   log_delivery = {
     cloudwatch_logs = {
@@ -701,7 +717,7 @@ module "s3_sink_connector" {
       log_group = module.s3_sink_connector_log_group.name
     }
   }
-  
+
   bootstrap_servers          = module.msk_cluster.bootstrap_brokers
   security_groups            = [module.msk_sg.id]
   subnets                    = module.vpc.private_subnets
@@ -710,7 +726,7 @@ module "s3_sink_connector" {
   plugin_arn                 = aws_mskconnect_custom_plugin.s3_sink_plugin.arn
   plugin_revision            = aws_mskconnect_custom_plugin.s3_sink_plugin.latest_revision
   service_execution_role_arn = module.s3_sink_role.arn
-  
+
   use_autoscaling = true
   autoscaling = {
     worker_count     = 1
@@ -719,7 +735,7 @@ module "s3_sink_connector" {
     scale_in_cpu     = 20
     scale_out_cpu    = 80
   }
-  
+
   depends_on = [
     module.msk_cluster,
     module.debezium_postgres_connector
@@ -774,7 +790,7 @@ module "rds_memory_alarm" {
   namespace           = "AWS/RDS"
   period              = "300"
   statistic           = "Average"
-  threshold           = "1073741824"  # 1 GB in bytes
+  threshold           = "1073741824" # 1 GB in bytes
   alarm_description   = "RDS freeable memory is below 1 GB"
   alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
   ok_actions          = [module.cdc_alarm_notifications.topic_arn]
@@ -814,7 +830,7 @@ module "rds_replication_lag_alarm" {
   namespace           = "AWS/RDS"
   period              = "60"
   statistic           = "Maximum"
-  threshold           = "1000"  # 1000 MB
+  threshold           = "1000" # 1000 MB
   alarm_description   = "RDS replication slot lag is high - CDC may be falling behind"
   alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
   ok_actions          = [module.cdc_alarm_notifications.topic_arn]
@@ -854,7 +870,7 @@ module "rds_storage_alarm" {
   namespace           = "AWS/RDS"
   period              = "300"
   statistic           = "Average"
-  threshold           = "10737418240"  # 10 GB in bytes
+  threshold           = "10737418240" # 10 GB in bytes
   alarm_description   = "RDS free storage space is below 10 GB"
   alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
   ok_actions          = [module.cdc_alarm_notifications.topic_arn]
@@ -894,7 +910,7 @@ module "msk_disk_alarm" {
   namespace           = "AWS/Kafka"
   period              = "300"
   statistic           = "Average"
-  threshold           = "80"  # 80% disk usage
+  threshold           = "80" # 80% disk usage
   alarm_description   = "MSK disk usage is above 80%"
   alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
   ok_actions          = [module.cdc_alarm_notifications.topic_arn]
@@ -974,7 +990,7 @@ module "msk_network_in_alarm" {
   namespace           = "AWS/Kafka"
   period              = "300"
   statistic           = "Average"
-  threshold           = "100000000"  # 100 MB/s
+  threshold           = "100000000" # 100 MB/s
   alarm_description   = "MSK incoming network throughput is high"
   alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
   ok_actions          = [module.cdc_alarm_notifications.topic_arn]
@@ -994,14 +1010,14 @@ module "msk_consumer_lag_alarm" {
   namespace           = "AWS/Kafka"
   period              = "300"
   statistic           = "Maximum"
-  threshold           = "300000"  # 5 minutes in milliseconds
+  threshold           = "300000" # 5 minutes in milliseconds
   alarm_description   = "MSK consumer lag is above 5 minutes"
   alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
   ok_actions          = [module.cdc_alarm_notifications.topic_arn]
 
   dimensions = {
-    "Cluster Name"  = module.msk_cluster.cluster_name
-    "Consumer Group" = "connect-s3-sink-connector"  # Adjust based on your consumer group
+    "Cluster Name"   = module.msk_cluster.cluster_name
+    "Consumer Group" = "connect-s3-sink-connector" # Adjust based on your consumer group
   }
 }
 
