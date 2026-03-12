@@ -89,3 +89,7 @@ variable "worker_count" {
   default     = 1
   description = "(deprecated) kept for backward compatibility"
 }
+variable "tags" {
+  type = map(string)
+  default = {}
+}

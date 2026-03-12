@@ -5,3 +5,7 @@ variable "subscriptions" {
         endpoint = string
     }))
 }
+variable "tags" {
+  type = map(string)
+  default = {}
+}

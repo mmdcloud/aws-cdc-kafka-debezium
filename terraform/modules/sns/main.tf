@@ -1,9 +1,7 @@
 # SNS Topic for notifying users about the state changes in MediaConvert Job
 resource "aws_sns_topic" "topic" {
   name = var.topic_name
-  tags = {
-    Name = var.topic_name
-  }
+  tags = concat({},var.tags)
 }
 
 # SNS Subscription

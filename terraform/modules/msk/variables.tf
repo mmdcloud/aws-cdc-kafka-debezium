@@ -9,3 +9,7 @@ variable "encryption_in_transit_client_broker"{}
 variable "configuration_kafka_versions"{}
 variable "configuration_name"{}
 variable "configuration_server_properties"{} 
+variable "tags" {
+  type = map(string)
+  default = {}
+}

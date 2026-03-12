@@ -31,7 +31,9 @@ module "vpc" {
   single_nat_gateway      = true
   one_nat_gateway_per_az  = false
   tags = {
-    Project = "cdc"
+    Name      = "cdc-vpc"
+    ManagedBy = "terraform"
+    Project   = "cdc-kafka-debezium"
   }
 }
 
@@ -60,7 +62,9 @@ module "rds_sg" {
     }
   ]
   tags = {
-    Name = "rds-sg"
+    Name      = "rds-sg"
+    ManagedBy = "terraform"
+    Project   = "cdc-kafka-debezium"
   }
 }
 
@@ -90,7 +94,9 @@ module "msk_sg" {
     }
   ]
   tags = {
-    Name = "msk-sg"
+    Name      = "msk-sg"
+    ManagedBy = "terraform"
+    Project   = "cdc-kafka-debezium"
   }
 }
 
@@ -116,6 +122,11 @@ module "db_credentials" {
     username = tostring(data.vault_generic_secret.rds.data["username"])
     password = tostring(data.vault_generic_secret.rds.data["password"])
   })
+  tags = {
+    Name      = "rds-secrets"
+    ManagedBy = "terraform"
+    Project   = "cdc-kafka-debezium"
+  }
 }
 
 # -----------------------------------------------------------------------------------------
@@ -189,6 +200,11 @@ module "source_db" {
     #   apply_method = "immediate"
     # }
   ]
+  tags = {
+    Name      = "cdcsourcedb"
+    ManagedBy = "terraform"
+    Project   = "cdc-kafka-debezium"
+  }
 }
 
 # -----------------------------------------------------------------------------------------
@@ -284,6 +300,11 @@ unclean.leader.election.enable=false
 group.min.session.timeout.ms=6000
 group.max.session.timeout.ms=1800000
 PROPERTIES
+  tags = {
+    Name      = "cdc-cluster"
+    ManagedBy = "terraform"
+    Project   = "cdc-kafka-debezium"
+  }
 }
 
 # -----------------------------------------------------------------------------------------
@@ -313,6 +334,11 @@ module "destination_bucket" {
   bucket_notification = {
     queue           = []
     lambda_function = []
+  }
+  tags = {
+    Name      = "cdcdestinationbucket-${random_id.random.hex}"
+    ManagedBy = "terraform"
+    Project   = "cdc-kafka-debezium"
   }
 }
 
@@ -349,6 +375,11 @@ module "plugins_bucket" {
   bucket_notification = {
     queue           = []
     lambda_function = []
+  }
+  tags = {
+    Name      = "cdcdebeziumplugins-${random_id.random.hex}"
+    ManagedBy = "terraform"
+    Project   = "cdc-kafka-debezium"
   }
 }
 
@@ -458,6 +489,11 @@ module "debezium_connector_role" {
         ]
     }
     EOF
+  tags = {
+    Name      = "debezium-connector-role"
+    ManagedBy = "terraform"
+    Project   = "cdc-kafka-debezium"
+  }
 }
 
 module "s3_sink_role" {
@@ -543,6 +579,11 @@ module "s3_sink_role" {
         ]
     }
     EOF
+  tags = {
+    Name      = "s3-sink-role"
+    ManagedBy = "terraform"
+    Project   = "cdc-kafka-debezium"
+  }
 }
 
 # -----------------------------------------------------------------------------------------
@@ -654,6 +695,12 @@ module "debezium_postgres_connector" {
     scale_out_cpu    = 80
   }
 
+  tags = {
+    Name      = "debezium-postgres-connector"
+    ManagedBy = "terraform"
+    Project   = "cdc-kafka-debezium"
+  }
+
   depends_on = [
     module.msk_cluster,
     null_resource.setup_postgres_cdc
@@ -736,6 +783,12 @@ module "s3_sink_connector" {
     scale_out_cpu    = 80
   }
 
+  tags = {
+    Name      = "s3-sink-connector"
+    ManagedBy = "terraform"
+    Project   = "cdc-kafka-debezium"
+  }
+
   depends_on = [
     module.msk_cluster,
     module.debezium_postgres_connector
@@ -754,6 +807,11 @@ module "cdc_alarm_notifications" {
       endpoint = var.notification_email
     }
   ]
+  tags = {
+    Name      = "cdc-alarm-notifications"
+    ManagedBy = "terraform"
+    Project   = "cdc-kafka-debezium"
+  }
 }
 
 # -----------------------------------------------------------------------------------------

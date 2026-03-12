@@ -37,3 +37,7 @@ variable "bucket_notification" {
     lambda_function = []
   }
 }
+variable "tags" {
+  type = map(string)
+  default = {}
+}

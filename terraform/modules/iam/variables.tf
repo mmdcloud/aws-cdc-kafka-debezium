@@ -16,3 +16,7 @@ variable "policy_description" {
 variable "policy" {
   
 }
+variable "tags" {
+  type = map(string)
+  default = {}
+}
