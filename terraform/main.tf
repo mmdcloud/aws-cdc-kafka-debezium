@@ -617,7 +617,7 @@ module "debezium_postgres_connector" {
     "plugin.name"                 = "pgoutput"
     "slot.name"                   = "debezium"
     "publication.name"            = "debezium_pub"
-    "publication.autocreate.mode" = "filtered"
+    "publication.autocreate.mode" = "all_tables"
     "slot.drop.on.stop"           = "false"
 
     # Authentication

@@ -16,5 +16,10 @@ variable "extended_statistic" {
     default = ""
 }
 variable "treat_missing_data" {
-    default = ""
+    type        = string
+    default = "missing"
+    validation {
+    condition     = contains(["breaching", "ignore", "missing", "notBreaching"], var.treat_missing_data)
+    error_message = "The treat_missing_data value must be one of: breaching, ignore, missing, or notBreaching."
+  }
 }

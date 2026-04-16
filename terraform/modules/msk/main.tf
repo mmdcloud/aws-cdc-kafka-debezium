@@ -35,7 +35,7 @@ resource "aws_msk_cluster" "cluster" {
 #       }
 #     }
 #   }
-tags = concat({},var.tags)
+tags = merge({},var.tags)
 }
 
 resource "aws_msk_configuration" "cdc_config" {

@@ -9,3 +9,7 @@ output "bootstrap_brokers" {
 output "arn" {
   value = aws_msk_cluster.cluster.arn
 }
+
+output "cluster_name" {
+  value = aws_msk_cluster.cluster.cluster_name
+}

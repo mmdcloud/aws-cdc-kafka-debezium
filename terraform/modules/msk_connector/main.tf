@@ -60,5 +60,5 @@ resource "aws_mskconnect_connector" "connector" {
       revision = var.plugin_revision
     }
   }
-  tags = concat({},var.tags)
+  tags = merge({},var.tags)
 }

@@ -3,7 +3,7 @@ resource "aws_iam_role" "role" {
   name               = var.role_name
   description        = var.role_description
   assume_role_policy = var.assume_role_policy
-  tags = concat({},var.tags)
+  tags = merge({},var.tags)
 }
 
 # Policy
