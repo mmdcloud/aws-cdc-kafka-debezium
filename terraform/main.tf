@@ -68,6 +68,34 @@ module "rds_sg" {
   }
 }
 
+module "destination_test_instance_sg" {
+  source = "./modules/security-groups"
+  name   = "destination-test-instance-sg"
+  vpc_id = module.vpc.vpc_id
+  ingress_rules = [
+    {
+      description     = "Allow SSH From anywhere"
+      from_port       = 22
+      to_port         = 22
+      protocol        = "tcp"
+      security_groups = []
+      cidr_blocks     = ["0.0.0.0/0"]
+    }
+  ]
+  egress_rules = [
+    {
+      description = "Allow all outbound traffic"
+      from_port   = 0
+      to_port     = 0
+      protocol    = "-1"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
+  ]
+  tags = {
+    Name = "destination-test-instance-sg"
+  }
+}
+
 # MSK Security Group
 module "msk_sg" {
   source = "./modules/security-groups"
@@ -812,6 +840,41 @@ module "cdc_alarm_notifications" {
     ManagedBy = "terraform"
     Project   = "cdc-kafka-debezium"
   }
+}
+
+# -----------------------------------------------------------------------------------------
+# RDS Test Instance
+# -----------------------------------------------------------------------------------------
+data "aws_ami" "ubuntu" {
+  most_recent = true
+
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+
+  owners = ["099720109477"]
+}
+
+data "aws_key_pair" "key_pair" {
+  key_name = "madmaxkeypair"
+}
+
+module "destination_test_instance" {
+  source                      = "./modules/ec2"
+  name                        = "destination-test-instance"
+  ami                         = data.aws_ami.ubuntu.id
+  instance_type               = "t2.micro"
+  associate_public_ip_address = true
+  key_name                    = data.aws_key_pair.key_pair.key_name
+  subnet_id                   = module.vpc.public_subnets[0]
+  security_groups             = [module.destination_test_instance_sg.id]
+  user_data                   = filebase64("${path.module}/scripts/user_data.sh")
 }
 
 # -----------------------------------------------------------------------------------------
