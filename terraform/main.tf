@@ -649,8 +649,8 @@ module "debezium_postgres_connector" {
     "slot.drop.on.stop"           = "false"
 
     # Authentication
-    "database.user"     = tostring(data.vault_generic_secret.rds.data["username"])
-    "database.password" = tostring(data.vault_generic_secret.rds.data["password"])
+    "database.user"     = "${sm:/rds-secrets:username}"
+    "database.password" = "${sm:/rds-secrets:username}"
 
     # Task configuration
     "tasks.max" = "1"
@@ -1230,23 +1230,23 @@ module "s3_sink_running_tasks_alarm" {
   }
 }
 
-module "debezium_error_alarm" {
-  source              = "./modules/cloudwatch/cloudwatch-alarm"
-  alarm_name          = "debezium-connector-errors"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = "1"
-  metric_name         = "DebeziumErrorCount"
-  namespace           = "CDC/Connectors"
-  period              = "300"
-  statistic           = "Sum"
-  threshold           = "5"
-  alarm_description   = "Debezium connector has errors in logs"
-  alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
-  ok_actions          = [module.cdc_alarm_notifications.topic_arn]
-  treat_missing_data  = "notBreaching"
+# module "debezium_error_alarm" {
+#   source              = "./modules/cloudwatch/cloudwatch-alarm"
+#   alarm_name          = "debezium-connector-errors"
+#   comparison_operator = "GreaterThanThreshold"
+#   evaluation_periods  = "1"
+#   metric_name         = "DebeziumErrorCount"
+#   namespace           = "CDC/Connectors"
+#   period              = "300"
+#   statistic           = "Sum"
+#   threshold           = "5"
+#   alarm_description   = "Debezium connector has errors in logs"
+#   alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
+#   ok_actions          = [module.cdc_alarm_notifications.topic_arn]
+#   treat_missing_data  = "notBreaching"
 
-  dimensions = {}
-}
+#   dimensions = {}
+# }
 
 module "s3_sink_error_alarm" {
   source              = "./modules/cloudwatch/cloudwatch-alarm"
