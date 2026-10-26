@@ -172,14 +172,10 @@ module "source_db" {
   password          = tostring(data.vault_generic_secret.rds.data["password"])
   subnet_group_name = "cdc-rds-subnet-group"
   # enabled_cloudwatch_logs_exports = ["audit", "error", "general", "slowquery"]
-  backup_retention_period = 7
-  backup_window           = "03:00-06:00"
-  maintenance_window      = "Mon:00:00-Mon:03:00"
-  subnet_group_ids = [
-    module.vpc.database_subnets[0],
-    module.vpc.database_subnets[1],
-    module.vpc.database_subnets[2]
-  ]
+  backup_retention_period               = 7
+  backup_window                         = "03:00-06:00"
+  maintenance_window                    = "Mon:00:00-Mon:03:00"
+  subnet_group_ids                      = module.vpc.database_subnets
   vpc_security_group_ids                = [module.rds_sg.id]
   publicly_accessible                   = false
   deletion_protection                   = false
@@ -245,30 +241,26 @@ resource "null_resource" "setup_postgres_cdc" {
   depends_on = [module.source_db]
   provisioner "local-exec" {
     command = <<-EOT
-      cat > ~/.pgpass << EOF
-${split(":", module.source_db.endpoint)[0]}:5432:cdcsourcedb:${data.vault_generic_secret.rds.data["username"]}:${data.vault_generic_secret.rds.data["password"]}
-EOF
-      chmod 600 ~/.pgpass
-      
-      # Create publication
-      psql -h ${split(":", module.source_db.endpoint)[0]} \
-           -U ${data.vault_generic_secret.rds.data["username"]} \
-           -d cdcsourcedb \
-           -c "CREATE PUBLICATION IF NOT EXISTS debezium_pub FOR ALL TABLES;"
+      export PGPASSWORD="${data.vault_generic_secret.rds.data["password"]}"
+      DB_HOST="${split(":", module.source_db.endpoint)[0]}"
+      DB_USER="${data.vault_generic_secret.rds.data["username"]}"
+      DB_NAME="cdcsourcedb"
 
-      psql -h ${split(":", module.source_db.endpoint)[0]} \
-     -U ${data.vault_generic_secret.rds.data["username"]} \
-     -d cdcsourcedb \
-     -c "CREATE TABLE IF NOT EXISTS heartbeat (status INT PRIMARY KEY);"
-      
-      # Create replication slot only if it doesn't exist
-      psql -h ${split(":", module.source_db.endpoint)[0]} \
-           -U ${data.vault_generic_secret.rds.data["username"]} \
-           -d cdcsourcedb \
-           -c "SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = 'debezium') THEN pg_create_logical_replication_slot('debezium', 'pgoutput') END;" \
-           2>&1 || true
-      
-      rm ~/.pgpass
+      # Check if RDS is reachable from local environment (times out after 5 seconds if private)
+      if ! pg_isready -h "$DB_HOST" -p 5432 -U "$DB_USER" -t 5 2>/dev/null; then
+        echo "WARNING: RDS is in a private subnet and not directly reachable from this host."
+        echo "Debezium will auto-create the publication and replication slot upon first connection."
+        echo "Create the heartbeat table from within the VPC (e.g. via destination_test_instance) using:"
+        echo "  CREATE TABLE IF NOT EXISTS heartbeat (id INT PRIMARY KEY, ts TIMESTAMPTZ);"
+        exit 0
+      fi
+
+      # If reachable, create the heartbeat table and publication
+      psql -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" \
+           -c "CREATE TABLE IF NOT EXISTS heartbeat (id INT PRIMARY KEY, ts TIMESTAMPTZ);" 2>&1 || true
+
+      psql -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" \
+           -c "CREATE PUBLICATION IF NOT EXISTS debezium_pub FOR ALL TABLES;" 2>&1 || true
     EOT
   }
 }
@@ -573,6 +565,8 @@ module "s3_sink_role" {
                   "s3:GetObject",
                   "s3:ListBucket",
                   "s3:AbortMultipartUpload",
+                  "s3:ListMultipartUploadParts",
+                  "s3:ListBucketMultipartUploads",
                   "s3:GetBucketLocation"
                 ],
                 "Resource": [
@@ -635,11 +629,10 @@ module "debezium_postgres_connector" {
   kafkaconnect_version = "2.7.1"
   connector_configuration = {
     # Core connector settings
-    "connector.class"      = "io.debezium.connector.postgresql.PostgresConnector"
-    "database.hostname"    = split(":", module.source_db.endpoint)[0]
-    "database.port"        = "5432"
-    "database.dbname"      = "cdcsourcedb"
-    "database.server.name" = "postgres-cdc"
+    "connector.class"   = "io.debezium.connector.postgresql.PostgresConnector"
+    "database.hostname" = split(":", module.source_db.endpoint)[0]
+    "database.port"     = "5432"
+    "database.dbname"   = "cdcsourcedb"
 
     # Postgres-specific settings
     "plugin.name"                 = "pgoutput"
@@ -649,8 +642,8 @@ module "debezium_postgres_connector" {
     "slot.drop.on.stop"           = "false"
 
     # Authentication
-    "database.user"     = "${sm:/rds-secrets:username}"
-    "database.password" = "${sm:/rds-secrets:username}"
+    "database.user"     = tostring(data.vault_generic_secret.rds.data["username"])
+    "database.password" = tostring(data.vault_generic_secret.rds.data["password"])
 
     # Task configuration
     "tasks.max" = "1"
@@ -659,17 +652,9 @@ module "debezium_postgres_connector" {
     "topic.prefix"       = "postgres-cdc"
     "table.include.list" = "public.*"
 
-    # Schema history (required for Debezium)
-    "schema.history.internal.kafka.bootstrap.servers"         = module.msk_cluster.bootstrap_brokers
-    "schema.history.internal.kafka.topic"                     = "schema-changes.postgres"
-    "schema.history.internal.kafka.recovery.poll.interval.ms" = "1000"
-    "schema.history.internal.kafka.recovery.attempts"         = "100"
-    "schema.history.internal.consumer.security.protocol"      = "PLAINTEXT"
-    "schema.history.internal.producer.security.protocol"      = "PLAINTEXT"
-
-    # Heartbeat to prevent slot timeout
+    # Heartbeat to prevent slot timeout and advance WAL position
     "heartbeat.interval.ms"  = "10000"
-    "heartbeat.action.query" = "INSERT INTO heartbeat (status) VALUES (1) ON CONFLICT DO NOTHING"
+    "heartbeat.action.query" = "INSERT INTO heartbeat (id, ts) VALUES (1, NOW()) ON CONFLICT (id) DO UPDATE SET ts = EXCLUDED.ts"
 
     # Snapshot configuration
     "snapshot.mode"         = "initial"
@@ -702,11 +687,7 @@ module "debezium_postgres_connector" {
 
   bootstrap_servers = module.msk_cluster.bootstrap_brokers
   security_groups   = [module.msk_sg.id]
-  subnets = [
-    module.vpc.private_subnets[0],
-    module.vpc.private_subnets[1],
-    module.vpc.private_subnets[2]
-  ]
+  subnets           = module.vpc.private_subnets
 
   authentication_type        = "NONE"
   encryption_type            = "PLAINTEXT"
@@ -1131,14 +1112,14 @@ module "msk_consumer_lag_alarm" {
   namespace           = "AWS/Kafka"
   period              = "300"
   statistic           = "Maximum"
-  threshold           = "300000" # 5 minutes in milliseconds
+  threshold           = "300" # 5 minutes in seconds
   alarm_description   = "MSK consumer lag is above 5 minutes"
   alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
   ok_actions          = [module.cdc_alarm_notifications.topic_arn]
 
   dimensions = {
     "Cluster Name"   = module.msk_cluster.cluster_name
-    "Consumer Group" = "connect-s3-sink-connector" # Adjust based on your consumer group
+    "Consumer Group" = "connect-s3-sink-connector"
   }
 }
 
@@ -1148,7 +1129,7 @@ module "debezium_failed_tasks_alarm" {
   alarm_name          = "debezium-connector-failed-tasks"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = "1"
-  metric_name         = "task-count"
+  metric_name         = "ErroredTaskCount"
   namespace           = "AWS/KafkaConnect"
   period              = "60"
   statistic           = "Maximum"
@@ -1158,29 +1139,27 @@ module "debezium_failed_tasks_alarm" {
   ok_actions          = [module.cdc_alarm_notifications.topic_arn]
 
   dimensions = {
-    "connector-name" = module.debezium_postgres_connector.connector_name
-    "task-state"     = "failed"
+    ConnectorName = module.debezium_postgres_connector.connector_name
   }
 }
 
-# Debezium Connector Running Tasks
-module "debezium_running_tasks_alarm" {
+# Debezium Connector Paused Tasks
+module "debezium_paused_tasks_alarm" {
   source              = "./modules/cloudwatch/cloudwatch-alarm"
-  alarm_name          = "debezium-connector-no-running-tasks"
-  comparison_operator = "LessThanThreshold"
-  evaluation_periods  = "2"
-  metric_name         = "task-count"
+  alarm_name          = "debezium-connector-paused-tasks"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "1"
+  metric_name         = "PausedTaskCount"
   namespace           = "AWS/KafkaConnect"
   period              = "300"
-  statistic           = "Minimum"
-  threshold           = "1"
-  alarm_description   = "Debezium connector has no running tasks"
+  statistic           = "Maximum"
+  threshold           = "0"
+  alarm_description   = "Debezium connector has paused tasks"
   alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
   ok_actions          = [module.cdc_alarm_notifications.topic_arn]
 
   dimensions = {
-    "connector-name" = module.debezium_postgres_connector.connector_name
-    "task-state"     = "running"
+    ConnectorName = module.debezium_postgres_connector.connector_name
   }
 }
 
@@ -1194,7 +1173,7 @@ module "s3_sink_failed_tasks_alarm" {
   alarm_name          = "s3-sink-connector-failed-tasks"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = "1"
-  metric_name         = "task-count"
+  metric_name         = "ErroredTaskCount"
   namespace           = "AWS/KafkaConnect"
   period              = "60"
   statistic           = "Maximum"
@@ -1204,64 +1183,44 @@ module "s3_sink_failed_tasks_alarm" {
   ok_actions          = [module.cdc_alarm_notifications.topic_arn]
 
   dimensions = {
-    "connector-name" = module.s3_sink_connector.connector_name
-    "task-state"     = "failed"
+    ConnectorName = module.s3_sink_connector.connector_name
   }
 }
 
-# S3 Sink Connector Running Tasks
-module "s3_sink_running_tasks_alarm" {
+# S3 Sink Connector Paused Tasks
+module "s3_sink_paused_tasks_alarm" {
   source              = "./modules/cloudwatch/cloudwatch-alarm"
-  alarm_name          = "s3-sink-connector-no-running-tasks"
-  comparison_operator = "LessThanThreshold"
-  evaluation_periods  = "2"
-  metric_name         = "task-count"
+  alarm_name          = "s3-sink-connector-paused-tasks"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "1"
+  metric_name         = "PausedTaskCount"
   namespace           = "AWS/KafkaConnect"
   period              = "300"
-  statistic           = "Minimum"
-  threshold           = "1"
-  alarm_description   = "S3 Sink connector has no running tasks"
+  statistic           = "Maximum"
+  threshold           = "0"
+  alarm_description   = "S3 Sink connector has paused tasks"
   alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
   ok_actions          = [module.cdc_alarm_notifications.topic_arn]
 
   dimensions = {
-    "connector-name" = module.s3_sink_connector.connector_name
-    "task-state"     = "running"
+    ConnectorName = module.s3_sink_connector.connector_name
   }
 }
 
-# module "debezium_error_alarm" {
+# S3 Sink Connector Errors (Requires CloudWatch Metric Filter to be active)
+# module "s3_sink_error_alarm" {
 #   source              = "./modules/cloudwatch/cloudwatch-alarm"
-#   alarm_name          = "debezium-connector-errors"
+#   alarm_name          = "s3-sink-connector-errors"
 #   comparison_operator = "GreaterThanThreshold"
 #   evaluation_periods  = "1"
-#   metric_name         = "DebeziumErrorCount"
+#   metric_name         = "S3SinkErrorCount"
 #   namespace           = "CDC/Connectors"
 #   period              = "300"
 #   statistic           = "Sum"
 #   threshold           = "5"
-#   alarm_description   = "Debezium connector has errors in logs"
+#   alarm_description   = "S3 Sink connector has errors in logs"
 #   alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
 #   ok_actions          = [module.cdc_alarm_notifications.topic_arn]
 #   treat_missing_data  = "notBreaching"
-
-#   dimensions = {}
+#   dimensions          = {}
 # }
-
-module "s3_sink_error_alarm" {
-  source              = "./modules/cloudwatch/cloudwatch-alarm"
-  alarm_name          = "s3-sink-connector-errors"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = "1"
-  metric_name         = "S3SinkErrorCount"
-  namespace           = "CDC/Connectors"
-  period              = "300"
-  statistic           = "Sum"
-  threshold           = "5"
-  alarm_description   = "S3 Sink connector has errors in logs"
-  alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
-  ok_actions          = [module.cdc_alarm_notifications.topic_arn]
-  treat_missing_data  = "notBreaching"
-
-  dimensions = {}
-}

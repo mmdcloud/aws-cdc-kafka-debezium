@@ -2,6 +2,7 @@ resource "aws_msk_cluster" "cluster" {
   cluster_name           = var.cluster_name
   kafka_version          = var.kafka_version
   number_of_broker_nodes = var.number_of_broker_nodes
+  enhanced_monitoring    = var.enhanced_monitoring
 
   broker_node_group_info {
     instance_type   = var.instance_type

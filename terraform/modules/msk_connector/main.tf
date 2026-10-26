@@ -3,7 +3,7 @@ resource "aws_mskconnect_connector" "connector" {
   kafkaconnect_version       = var.kafkaconnect_version
   service_execution_role_arn = var.service_execution_role_arn
   dynamic "capacity" {
-    for_each = var.use_autoscaling ? [1] : [0]
+    for_each = var.use_autoscaling ? [1] : []
     content {
       autoscaling {
         mcu_count        = var.autoscaling.worker_count

@@ -1,3 +1,3 @@
 #!/bin/bash
 sudo apt-get update
-sudo apt-get install default-mysql-client -y
+sudo apt-get install postgresql-client -y
