@@ -103,13 +103,12 @@ module "msk_sg" {
   vpc_id = module.vpc.vpc_id
   ingress_rules = [
     {
-      description     = "MSK Traffic"
+      description     = "Kafka traffic from inside the VPC"
       from_port       = 9092
       to_port         = 9098
       protocol        = "tcp"
       security_groups = []
-      self            = true
-      cidr_blocks     = ["0.0.0.0/0"]
+      cidr_blocks     = ["10.0.0.0/16"] # or module.vpc CIDR output
     }
   ]
   egress_rules = [
@@ -136,6 +135,16 @@ resource "aws_security_group_rule" "rds_from_msk_connectors" {
   source_security_group_id = module.msk_sg.id
   security_group_id        = module.rds_sg.id
   description              = "Allow MSK Connectors to access RDS"
+}
+
+resource "aws_security_group_rule" "rds_from_test_instance" {
+  type                     = "ingress"
+  from_port                = 5432
+  to_port                  = 5432
+  protocol                 = "tcp"
+  source_security_group_id = module.destination_test_instance_sg.id
+  security_group_id        = module.rds_sg.id
+  description              = "Allow test instance to reach RDS for CDC setup"
 }
 
 # -----------------------------------------------------------------------------------------
@@ -165,7 +174,7 @@ module "source_db" {
   db_name           = "cdcsourcedb"
   allocated_storage = 100
   engine            = "postgres"
-  engine_version    = "17.2"
+  engine_version    = "17.5"
   instance_class    = "db.t4g.large"
   multi_az          = true
   username          = tostring(data.vault_generic_secret.rds.data["username"])
@@ -241,27 +250,18 @@ resource "null_resource" "setup_postgres_cdc" {
   depends_on = [module.source_db]
   provisioner "local-exec" {
     command = <<-EOT
-      export PGPASSWORD="${data.vault_generic_secret.rds.data["password"]}"
-      DB_HOST="${split(":", module.source_db.endpoint)[0]}"
-      DB_USER="${data.vault_generic_secret.rds.data["username"]}"
-      DB_NAME="cdcsourcedb"
+    export PGPASSWORD="${data.vault_generic_secret.rds.data["password"]}"
+    DB_HOST="${split(":", module.source_db.endpoint)[0]}"
+    DB_USER="${data.vault_generic_secret.rds.data["username"]}"
+    DB_NAME="cdcsourcedb"
 
-      # Check if RDS is reachable from local environment (times out after 5 seconds if private)
-      if ! pg_isready -h "$DB_HOST" -p 5432 -U "$DB_USER" -t 5 2>/dev/null; then
-        echo "WARNING: RDS is in a private subnet and not directly reachable from this host."
-        echo "Debezium will auto-create the publication and replication slot upon first connection."
-        echo "Create the heartbeat table from within the VPC (e.g. via destination_test_instance) using:"
-        echo "  CREATE TABLE IF NOT EXISTS heartbeat (id INT PRIMARY KEY, ts TIMESTAMPTZ);"
-        exit 0
-      fi
+    if ! pg_isready -h "$DB_HOST" -p 5432 -U "$DB_USER" -t 5 >/dev/null 2>&1; then
+      echo "RDS not reachable from this host. Run the SQL in scripts/cdc_setup.sql from the test instance."
+      exit 0
+    fi
 
-      # If reachable, create the heartbeat table and publication
-      psql -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" \
-           -c "CREATE TABLE IF NOT EXISTS heartbeat (id INT PRIMARY KEY, ts TIMESTAMPTZ);" 2>&1 || true
-
-      psql -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" \
-           -c "CREATE PUBLICATION IF NOT EXISTS debezium_pub FOR ALL TABLES;" 2>&1 || true
-    EOT
+    psql -v ON_ERROR_STOP=1 -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" -f "${path.module}/scripts/cdc_setup.sql"
+  EOT
   }
 }
 
@@ -478,6 +478,18 @@ module "debezium_connector_role" {
             },
             {
                 "Action": [
+                  "s3:GetObject",
+                  "s3:ListBucket",
+                  "s3:GetBucketLocation"
+                ],
+                "Resource": [
+                  "${module.plugins_bucket.arn}",
+                  "${module.plugins_bucket.arn}/*"
+                ],
+                "Effect": "Allow"
+            },
+            {
+                "Action": [
                   "logs:CreateLogGroup",
                   "logs:CreateLogStream",
                   "logs:PutLogEvents",
@@ -577,6 +589,18 @@ module "s3_sink_role" {
             },
             {
                 "Action": [
+                  "s3:GetObject",
+                  "s3:ListBucket",
+                  "s3:GetBucketLocation"
+                ],
+                "Resource": [
+                  "${module.plugins_bucket.arn}",
+                  "${module.plugins_bucket.arn}/*"
+                ],
+                "Effect": "Allow"
+            },
+            {
+                "Action": [
                   "logs:CreateLogGroup",
                   "logs:CreateLogStream",
                   "logs:PutLogEvents",
@@ -626,7 +650,7 @@ module "s3_sink_connector_log_group" {
 module "debezium_postgres_connector" {
   source               = "./modules/msk_connector"
   name                 = "debezium-postgres-connector"
-  kafkaconnect_version = "2.7.1"
+  kafkaconnect_version = "3.7.x"
   connector_configuration = {
     # Core connector settings
     "connector.class"   = "io.debezium.connector.postgresql.PostgresConnector"
@@ -657,13 +681,12 @@ module "debezium_postgres_connector" {
     "heartbeat.action.query" = "INSERT INTO heartbeat (id, ts) VALUES (1, NOW()) ON CONFLICT (id) DO UPDATE SET ts = EXCLUDED.ts"
 
     # Snapshot configuration
-    "snapshot.mode"         = "initial"
-    "snapshot.locking.mode" = "none"
+    "snapshot.mode" = "initial"
 
     # Error handling
-    "errors.tolerance"            = "all"
+    "errors.tolerance"            = "none"
     "errors.log.enable"           = "true"
-    "errors.log.include.messages" = "true"
+    "errors.log.include.messages" = "false"
 
     # Converters
     "key.converter"                  = "org.apache.kafka.connect.json.JsonConverter"
@@ -719,7 +742,7 @@ module "debezium_postgres_connector" {
 module "s3_sink_connector" {
   source               = "./modules/msk_connector"
   name                 = "s3-sink-connector"
-  kafkaconnect_version = "2.7.1"
+  kafkaconnect_version = "3.7.x"
   connector_configuration = {
     # Core connector settings
     "connector.class" = "io.confluent.connect.s3.S3SinkConnector"
@@ -750,10 +773,13 @@ module "s3_sink_connector" {
     # Schema settings
     "schema.compatibility" = "NONE"
 
+    "errors.deadletterqueue.topic.replication.factor" = "3"
+    "errors.deadletterqueue.context.headers.enable"   = "true"
+
     # Error handling
     "errors.tolerance"                  = "all"
     "errors.log.enable"                 = "true"
-    "errors.log.include.messages"       = "true"
+    "errors.log.include.messages"       = "false"
     "errors.deadletterqueue.topic.name" = "dlq-s3-sink"
 
     # Converters (must match Debezium output)
@@ -843,7 +869,7 @@ data "aws_ami" "ubuntu" {
 }
 
 data "aws_key_pair" "key_pair" {
-  key_name = "madmaxkeypair"
+  key_name = "mohitd"
 }
 
 module "destination_test_instance" {
@@ -982,10 +1008,15 @@ module "rds_storage_alarm" {
   }
 }
 
+locals {
+  broker_ids = toset(["1", "2", "3"])
+}
+
 # MSK CPU Utilization
 module "msk_cpu_alarm" {
+  for_each            = local.broker_ids
   source              = "./modules/cloudwatch/cloudwatch-alarm"
-  alarm_name          = "msk-high-cpu-utilization"
+  alarm_name          = "msk-high-cpu-broker-${each.key}"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = "2"
   metric_name         = "CpuUser"
@@ -993,12 +1024,13 @@ module "msk_cpu_alarm" {
   period              = "300"
   statistic           = "Average"
   threshold           = "80"
-  alarm_description   = "MSK CPU utilization is above 80%"
+  alarm_description   = "MSK broker ${each.key} CPU above 80%"
   alarm_actions       = [module.cdc_alarm_notifications.topic_arn]
   ok_actions          = [module.cdc_alarm_notifications.topic_arn]
 
   dimensions = {
     "Cluster Name" = module.msk_cluster.cluster_name
+    "Broker ID"    = each.key
   }
 }
 
